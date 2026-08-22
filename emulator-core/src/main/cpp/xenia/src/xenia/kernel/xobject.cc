@@ -356,11 +356,6 @@ bool CooperativeWaiterFifo::HasWaiters() {
   return !waiters_.empty();
 }
 
-XThread* CooperativeWaiterFifo::Front() {
-  std::lock_guard<std::mutex> lock(lock_);
-  return waiters_.empty() ? nullptr : waiters_.front();
-}
-
 namespace {
 // Signal ring. Small, lock-guarded and write-mostly: it is touched once per
 // cooperative wake, which is rare next to the poll traffic it helps explain.
@@ -411,7 +406,7 @@ void XObject::WakeCooperativeWaiters() {
   // and the resulting empty scheduling passes). Every watcher's CPU is woken,
   // not just the permit FIFO front's, which loses the wake whenever that
   // waiter leaves between the signal and its dispatch.
-  kernel_state()->guest_scheduler()->WakeForSignal(this, nullptr);
+  kernel_state()->guest_scheduler()->WakeForSignal(this);
 }
 
 void XObject::EnterCooperativeWait(XThread* thread) {
@@ -472,8 +467,8 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
     EnterCooperativeWait(self);  // FIFO fairness for semaphores
     if (self) {
       const uint32_t wait_handle_id = handle();
-      self->set_cooperative_wait_shape(
-          XThread::CooperativeWaitKind::kSingle, &wait_handle_id, 1);
+      self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kSingle,
+                                       &wait_handle_id, 1);
     }
     X_STATUS status = CooperativeWait(
         scheduler, self, kthread, this, alertable != 0, deadline_ms,
