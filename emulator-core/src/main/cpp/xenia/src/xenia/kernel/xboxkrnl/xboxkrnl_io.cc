@@ -25,6 +25,10 @@ namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 
+// Boost a thread woken by a completed file read or write, as NT's I/O manager
+// does with IO_DISK_INCREMENT.
+constexpr uint32_t kIoDiskIncrement = 1;
+
 struct CreateOptions {
   // https://processhacker.sourceforge.io/doc/ntioapi_8h.html
   static constexpr uint32_t FILE_DIRECTORY_FILE = 0x00000001;
@@ -286,7 +290,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   }
 
   if (ev && signal_event) {
-    ev->Set(0, false);
+    ev->Set(kIoDiskIncrement, false);
   }
 
   return result;
@@ -374,7 +378,7 @@ dword_result_t NtReadFileScatter_entry(
   }
 
   if (ev && signal_event) {
-    ev->Set(0, false);
+    ev->Set(kIoDiskIncrement, false);
   }
 
   return result;
@@ -462,7 +466,7 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
   }
 
   if (ev && signal_event) {
-    ev->Set(0, false);
+    ev->Set(kIoDiskIncrement, false);
   }
 
   return result;
