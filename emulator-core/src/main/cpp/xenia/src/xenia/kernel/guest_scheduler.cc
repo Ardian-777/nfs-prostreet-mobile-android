@@ -507,6 +507,27 @@ XThread* GuestScheduler::DequeueReady(int cpu_index) {
   if (cpu.ready_summary.load(std::memory_order_relaxed) == 0) {
     return nullptr;
   }
+  // Owned from here, not from SwitchTo, because in between it is in no list
+  // and a concurrent MarkReady would queue it onto another CPU.
+  auto own = [this](XThread* picked) {
+    auto& links = picked->scheduler_links();
+    links.ready_next = nullptr;
+    links.queued = false;
+    links.running = true;
+    if (cvars::guest_scheduler_stats && links.ready_since_tick) {
+      uint64_t waited = Clock::host_tick_count_raw() - links.ready_since_tick;
+      stats_.ready_wait_ticks.fetch_add(waited, std::memory_order_relaxed);
+      stats_.ready_wait_count.fetch_add(1, std::memory_order_relaxed);
+      uint64_t prev =
+          stats_.ready_wait_max_ticks.load(std::memory_order_relaxed);
+      while (waited > prev &&
+             !stats_.ready_wait_max_ticks.compare_exchange_weak(
+                 prev, waited, std::memory_order_relaxed)) {
+      }
+    }
+    return picked;
+  };
+
   // Strict priority alone lets a high-priority yield-spinner deadlock on the
   // lower-priority co-resident it depends on, so a voluntary yield opts out.
   XThread* yielder = cpu.yield_to_other;
@@ -535,31 +556,24 @@ XThread* GuestScheduler::DequeueReady(int cpu_index) {
     if (XThread* other = HighestReadyExcept(cpu, yielder)) {
       // |other| may sit mid-list, so unlink it generally rather than as a head.
       int other_level = other->scheduler_links().queued_prio;
+      if (other_level < yielder->scheduler_links().queued_prio) {
+        stats_.yield_downs.fetch_add(1, std::memory_order_relaxed);
+      }
       UnlinkLocked(cpu.ready_head[other_level], cpu.ready_tail[other_level],
                    other);
       if (!cpu.ready_head[other_level]) {
         ClearReadyLevel(cpu, other_level);
       }
-      auto& other_links = other->scheduler_links();
-      other_links.ready_next = nullptr;
-      other_links.queued = false;
-      other_links.running = true;
-      return other;
+      return own(other);
     }
   }
 
-  auto& links = thread->scheduler_links();
-  cpu.ready_head[level] = links.ready_next;
+  cpu.ready_head[level] = thread->scheduler_links().ready_next;
   if (!cpu.ready_head[level]) {
     cpu.ready_tail[level] = nullptr;
     ClearReadyLevel(cpu, level);
   }
-  links.ready_next = nullptr;
-  links.queued = false;
-  // Owned from here, not from SwitchTo, because in between it is in no list and
-  // a concurrent MarkReady would queue it onto another CPU.
-  links.running = true;
-  return thread;
+  return own(thread);
 }
 
 void GuestScheduler::LinkTailLocked(XThread*& head, XThread*& tail,
@@ -586,6 +600,10 @@ void GuestScheduler::LinkReadyLocked(Cpu& cpu, XThread* thread, bool at_head) {
   int prio = ClampPriority(thread->priority());
   links.queued_prio = prio;
   links.ready_next = nullptr;
+  // Only the stats counters read this, so a default build does not pay a tick
+  // read on every enqueue.
+  links.ready_since_tick =
+      cvars::guest_scheduler_stats ? Clock::host_tick_count_raw() : 0;
   if (at_head) {
     LinkHeadLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
   } else {
@@ -1635,6 +1653,10 @@ void GuestScheduler::ReportStatsIfDue() {
   uint64_t idle_wakes = take(stats_.idle_wakes);
   uint64_t switches = take(stats_.switches);
   uint64_t forced = take(stats_.forced_preempts);
+  uint64_t yield_downs = take(stats_.yield_downs);
+  uint64_t rw_ticks = take(stats_.ready_wait_ticks);
+  uint64_t rw_count = take(stats_.ready_wait_count);
+  uint64_t rw_max = take(stats_.ready_wait_max_ticks);
   uint64_t bg_windows = take(stats_.background_windows);
   uint64_t bg_picks = take(stats_.background_picks);
   uint64_t io_calls = take(stats_.io_calls);
@@ -1647,10 +1669,12 @@ void GuestScheduler::ReportStatsIfDue() {
   };
   XELOGI(
       "GuestScheduler: repolls {}/s (rereadied {}, backstop rescues {}), idle "
-      "wakes {}, switches {}, forced preempts {}, background {} windows {} "
-      "picks | io {} calls, queued avg {} us max {} us, ran avg {} us",
+      "wakes {}, switches {}, forced preempts {}, yields down {}, background "
+      "{} windows {} picks, ready wait avg {} us max {} us | io {} calls, "
+      "queued avg {} us max {} us, ran avg {} us",
       repolls, rereadied, backstop_rescues, idle_wakes, switches, forced,
-      bg_windows, bg_picks, io_calls,
+      yield_downs, bg_windows, bg_picks,
+      rw_count ? to_us(rw_ticks / rw_count) : 0, to_us(rw_max), io_calls,
       io_calls ? to_us(io_queue / io_calls) : 0, to_us(io_queue_max),
       io_calls ? to_us(io_run / io_calls) : 0);
 }
@@ -1730,9 +1754,10 @@ void GuestScheduler::ReportNoProgress() {
       // In user code r13 is not the KPCR, and the membase is user mode's.
       const std::string irql = WatchdogIrql(running);
       XELOGW(
-          "  CPU {} running tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
-          "irql={} preempt_requested={} ready_summary={:#x}",
+          "  CPU {} running tid={:08X} '{}' prio={} last_safepoint={:08X} "
+          "lr={:08X} irql={} preempt_requested={} ready_summary={:#x}",
           i, running->thread_id(), running->thread_name(),
+          ClampPriority(running->priority()),
           uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
           irql,
           uint32_t(context->preempt_requested),
@@ -1855,10 +1880,11 @@ void GuestScheduler::WatchdogLoop() {
       const std::string irql = WatchdogIrql(running);
       XELOGW(
           "GuestScheduler: CPU {} has not switched fibers in {} watchdog "
-          "ticks. Running tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
-          "irql={} preempt_requested={} irql_defers={} lock_defers={} "
-          "ready_summary={:#x}",
+          "ticks. Running tid={:08X} '{}' prio={} last_safepoint={:08X} "
+          "lr={:08X} irql={} preempt_requested={} irql_defers={} "
+          "lock_defers={} ready_summary={:#x}",
           i, stall_ticks_[i], running->thread_id(), running->thread_name(),
+          ClampPriority(running->priority()),
           uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
           irql,
           uint32_t(context->preempt_requested),
