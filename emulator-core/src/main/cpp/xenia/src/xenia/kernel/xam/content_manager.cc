@@ -559,14 +559,13 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
   // A save stored as the package file itself (copied in by hand, say) mounts
   // read-only, so the title's writes to it would fail. It becomes the folder a
   // title's own saves are first, if it can (else it opens read-only). That is
-  // file I/O: before the global lock, and off the guest's dispatch thread.
+  // file I/O, so before the global lock.
   if (data.content_type == XContentType::kSavedGame) {
     std::filesystem::path save_path;
     std::error_code ec;
     if (!ResolvePackagePath(xuid, data, save_path, disc_number) &&
         std::filesystem::is_regular_file(save_path, ec)) {
-      kernel_state_->guest_scheduler()->RunBlockingHostCall(
-          [this, &save_path]() { UnpackPackageFile(save_path); });
+      UnpackPackageFile(save_path);
     }
   }
 
