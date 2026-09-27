@@ -251,12 +251,14 @@ void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
 // the single object waited on, null for a multi-wait. |self| is the waiting
 // fiber, resolved by the caller before the first yield: a thread_local read
 // after one resolves against the dispatch thread the fiber entered on, which
-// by then may be running another fiber or none.
+// by then may be running another fiber or none. |poll| is told whether the
+// waiter has blocked, as only a thread taken out of a wait is boosted.
 template <typename PollFn>
 X_STATUS CooperativeWait(GuestScheduler* scheduler, XThread* self,
                          X_KTHREAD* kthread, XObject* wait_object,
                          bool alertable, uint64_t deadline_ms, PollFn&& poll,
                          bool interruptible = true) {
+  bool parked = false;
   while (true) {
     // Alertable waits return on a queued user APC (the cooperative equivalent
     // of a host alertable-wait wake), then the caller runs xeProcessUserApcs.
@@ -275,7 +277,7 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, XThread* self,
     } else if (self) {
       wait_epoch = self->cooperative_wait_set_epoch();
     }
-    std::optional<X_STATUS> resolved = poll();
+    std::optional<X_STATUS> resolved = poll(parked);
     if (resolved) {
       WaitExit(self, kthread, *resolved);
       return *resolved;
@@ -286,6 +288,7 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, XThread* self,
     }
     scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable,
                                   interruptible);
+    parked = true;
   }
 }
 
@@ -480,7 +483,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
     }
     X_STATUS status = CooperativeWait(
         scheduler, self, kthread, this, alertable != 0, deadline_ms,
-        [&]() -> std::optional<X_STATUS> {
+        [&](bool parked) -> std::optional<X_STATUS> {
           // Released by a pulse that already reset the host primitive.
           if (cooperative_pulse_epoch() != entry_pulse_epoch) {
             if (self) {
@@ -497,7 +500,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                                           std::chrono::milliseconds(0));
           switch (poll) {
             case xe::threading::WaitResult::kSuccess: {
-              if (self) {
+              if (self && parked) {
                 self->BoostOnWake(priority_increment());
               }
               WaitCallback();
@@ -597,7 +600,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
     }
     X_STATUS status = CooperativeWait(
         scheduler, self, kthread, wait_object, alertable != 0, deadline_ms,
-        [&]() -> std::optional<X_STATUS> {
+        [&](bool parked) -> std::optional<X_STATUS> {
           // Released by a pulse that already reset the host primitive.
           if (wait_object->cooperative_pulse_epoch() != entry_pulse_epoch) {
             if (self) {
@@ -615,7 +618,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
               alertable ? true : false, std::chrono::milliseconds(0));
           switch (poll) {
             case xe::threading::WaitResult::kSuccess: {
-              if (self) {
+              if (self && parked) {
                 self->BoostOnWake(wait_object->priority_increment());
               }
               wait_object->WaitCallback();
@@ -737,7 +740,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
     }
     return CooperativeWait(
         scheduler, self, kthread, nullptr, alertable != 0, deadline_ms,
-        [&]() -> std::optional<X_STATUS> {
+        [&](bool parked) -> std::optional<X_STATUS> {
           resolve_handles();
           if (wait_type) {
             // WaitAny only: WaitAll needs every object signaled at once, which
@@ -760,7 +763,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
             switch (r.first) {
               case xe::threading::WaitResult::kSuccess: {
                 objects[r.second]->WaitCallback();
-                if (self) {
+                if (self && parked) {
                   self->BoostOnWake(objects[r.second]->priority_increment());
                 }
                 X_STATUS status = objects[r.second]->AcquireStatus();
@@ -795,7 +798,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                   boost_increment = objects[i]->priority_increment();
                 }
               }
-              if (self) {
+              if (self && parked) {
                 self->BoostOnWake(boost_increment);
               }
               return status;
