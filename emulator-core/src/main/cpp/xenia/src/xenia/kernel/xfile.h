@@ -239,6 +239,8 @@ class XFile : public XObject {
                          uint32_t apc_context);
 
   vfs::File* file_ = nullptr;
+  // The handle's wait state. Manual reset like NT's file object event, so every
+  // wait after a completion returns until the next request clears it.
   std::unique_ptr<threading::Event> async_event_ = nullptr;
 
   mutable std::mutex file_lock_;

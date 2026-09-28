@@ -33,12 +33,12 @@ XFile::XFile(KernelState* kernel_state, vfs::File* file, bool synchronous,
       file_(file),
       is_synchronous_(synchronous),
       is_alertable_(alertable) {
-  async_event_ = threading::Event::CreateAutoResetEvent(false);
+  async_event_ = threading::Event::CreateManualResetEvent(false);
   assert_not_null(async_event_);
 }
 
 XFile::XFile() : XObject(kObjectType), completion_port_lock_() {
-  async_event_ = threading::Event::CreateAutoResetEvent(false);
+  async_event_ = threading::Event::CreateManualResetEvent(false);
   assert_not_null(async_event_);
 }
 
