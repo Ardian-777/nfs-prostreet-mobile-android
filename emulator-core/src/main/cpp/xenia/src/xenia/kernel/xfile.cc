@@ -290,6 +290,9 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
 }
 
 void XFile::PostIo(std::function<void()> fn) {
+  // Cleared at issue, as NT clears the file object event, so a wait on the
+  // handle cannot return on an earlier request's completion.
+  async_event_->Reset();
   kernel_state()->guest_scheduler()->PostHostCall(std::move(fn),
                                                   io_call_class());
 }

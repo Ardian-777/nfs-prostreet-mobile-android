@@ -171,7 +171,8 @@ class XFile : public XObject {
                        uint64_t byte_offset, uint32_t* out_bytes_read,
                        uint32_t apc_context, bool notify_completion = true);
 
-  // Runs |fn| on an I/O worker without waiting.
+  // Clears the handle's wait state and runs |fn| on an I/O worker without
+  // waiting.
   void PostIo(std::function<void()> fn);
   // Signals the completion ports and this file's wait handle.
   void NotifyCompletion(X_STATUS status, uint32_t num_bytes,

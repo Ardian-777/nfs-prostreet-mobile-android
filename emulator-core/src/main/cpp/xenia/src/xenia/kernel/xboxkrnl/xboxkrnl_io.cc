@@ -25,9 +25,23 @@ namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 
-// File-pointer reads (offset -1) and reads at or past EOF complete inline.
-static bool CompletesAsync(XFile* file, uint64_t byte_offset) {
-  return !file->is_synchronous() && byte_offset < file->entry()->size();
+// Low bit probably means do not queue to IO ports.
+static bool QueuesApc(uint32_t apc_routine, uint32_t apc_context) {
+  return (apc_routine & ~1u) && apc_context;
+}
+
+// File-pointer reads (offset -1), reads at or past EOF and reads issued with an
+// APC from a user APC routine complete inline.
+static bool CompletesAsync(XFile* file, uint64_t byte_offset, XThread* thread,
+                           bool queues_apc) {
+  if (file->is_synchronous() || byte_offset >= file->entry()->size()) {
+    return false;
+  }
+  // TODO(has207): Likely not hardware accurate. Cars chains ReadFileEx from its
+  // completion routine, then only sleeps non-alertably. Completing inline
+  // queues the APC while the current delivery loop still drains the list. How
+  // the console delivers it is unknown.
+  return !(queues_apc && thread->in_user_apc());
 }
 
 struct CreateOptions {
@@ -252,8 +266,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
         status_block->status = status;
         status_block->information = bytes_read;
       }
-      // Low bit probably means do not queue to IO ports.
-      if ((apc_routine & ~1u) && apc_context_address &&
+      if (QueuesApc(apc_routine, apc_context_address) &&
           status == X_STATUS_SUCCESS) {
         thread->EnqueueApc(apc_routine & ~1u, apc_context_address,
                            status_block_address, 0);
@@ -265,7 +278,8 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
       return status;
     };
 
-    if (CompletesAsync(file.get(), byte_offset)) {
+    if (CompletesAsync(file.get(), byte_offset, thread.get(),
+                       QueuesApc(apc_routine, apc_context_address))) {
       if (ev) {
         ev->Reset();
       }
@@ -331,8 +345,7 @@ dword_result_t NtReadFileScatter_entry(
         status_block->status = status;
         status_block->information = bytes_read;
       }
-      // Low bit probably means do not queue to IO ports.
-      if ((apc_routine & ~1u) && apc_context_address) {
+      if (QueuesApc(apc_routine, apc_context_address)) {
         thread->EnqueueApc(apc_routine & ~1u, apc_context_address,
                            status_block_address, 0);
       }
@@ -343,7 +356,8 @@ dword_result_t NtReadFileScatter_entry(
       return status;
     };
 
-    if (CompletesAsync(file.get(), byte_offset)) {
+    if (CompletesAsync(file.get(), byte_offset, thread.get(),
+                       QueuesApc(apc_routine, apc_context_address))) {
       if (ev) {
         ev->Reset();
       }

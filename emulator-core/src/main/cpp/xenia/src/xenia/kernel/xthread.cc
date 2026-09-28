@@ -847,6 +847,8 @@ void XThread::Reenter(uint32_t address) {
   // Called when the game switches fiber stacks (e.g., via
   // KeSetCurrentStackPointers in games like Forza Horizon 2).
   // Must unwind through all frames between here and Execute().
+  // No user APC routine frame survives the unwind.
+  user_apc_depth_ = 0;
 #if !XE_PLATFORM_WIN32
   if (cvars::fiber_reentry_longjmp && !fiber_ && reentry_armed_ &&
       !reentry_nested_guest_depth_) {
