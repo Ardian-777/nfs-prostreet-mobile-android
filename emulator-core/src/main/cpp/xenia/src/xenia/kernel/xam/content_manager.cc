@@ -871,6 +871,11 @@ bool ContentManager::IsContentOpen(
   });
 }
 
+bool ContentManager::IsRootOpen(const std::string_view root_name) {
+  auto global_lock = global_critical_region_.Acquire();
+  return open_packages_.count(string_key_insensitive(root_name)) != 0;
+}
+
 void ContentManager::CloseOpenedFilesFromContent(
     const ContentPackage& package) {
   // TODO(Gliniak): Cleanup this code to care only about handles
