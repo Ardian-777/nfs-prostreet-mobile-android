@@ -111,14 +111,19 @@ class GuestScheduler {
 
   // Dispatch thread index a guest CPU maps to, for co-residency checks.
   int DispatchCpuOf(uint8_t guest_cpu) const;
+  // True when guest_scheduler_dispatch_cpus puts more than one guest CPU on a
+  // dispatch thread, where threads the console runs in parallel take turns.
+  static bool DispatchThreadsShared();
+
+  // Counts a safepoint preemption forced through a deferring IRQL.
+  void NoteForcedPreempt();
+
+  bool shutting_down() const { return shutting_down_.load(); }
 
   // Waits on a host Fence. On a fiber it polls and parks instead of blocking
   // the dispatch thread, so an unbounded wait such as a UI dialog does not
   // freeze the guest threads sharing it. The Fence must have one waiter.
   static void WaitOnFence(xe::threading::Fence& fence);
-
-  // Counts a safepoint preemption forced through a deferring IRQL.
-  void NoteForcedPreempt();
 
   // Opens a background-scheduling window on the background processors, as the
   // console does from its vblank DPC. Those CPUs prefer the low priority band

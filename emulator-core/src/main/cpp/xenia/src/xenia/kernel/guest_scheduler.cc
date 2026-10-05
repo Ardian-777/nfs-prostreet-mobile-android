@@ -39,8 +39,8 @@ DEFINE_uint32(
 DEFINE_bool(
     guest_scheduler_stats, false,
     "Log guest scheduler counters once a second: blocked-waiter re-poll rate, "
-    "fiber switches, forced preemptions, and how long offloaded blocking calls "
-    "queue behind the single I/O worker.",
+    "fiber switches, yields, and how long offloaded blocking calls queue "
+    "behind the single I/O worker.",
     "Kernel");
 DEFINE_uint32(
     guest_scheduler_dispatch_cpus, 6,
@@ -146,12 +146,12 @@ static bool TakeHeadRequeue(XThread::SchedulerLinks& links) {
   return at_head;
 }
 
-// Safepoints that may decline to preempt before one is forced through anyway.
-// A guest spinning at DISPATCH_LEVEL passes safepoints at roughly the loop
-// rate, so this is a short wait in wall-clock terms, and the alternative is an
-// unbounded livelock when the holder it spins on is co-resident.
+// Safepoints a guest at DISPATCH_LEVEL may decline before one is forced
+// through, only while guest CPUs share dispatch threads. A spin there passes
+// safepoints at about the loop rate, so this is a short wait in wall-clock
+// terms.
 static constexpr uint32_t kMaxIrqlPreemptDefers = 4096;
-// Reporting threshold for the lock case, which is never forced.
+// Reporting threshold for the lock case.
 static constexpr uint32_t kLockPreemptDeferReport = 65536;
 
 // The IRQL a watchdog report shows for a running thread, read from its KPCR
@@ -174,10 +174,10 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
   }
   auto* context = self->thread_state()->context();
   auto& links = self->scheduler_links();
-  // A co-resident fiber would re-enter the recursive lock on this host thread,
-  // silently breaking mutual exclusion, so this one is never forced. Report a
-  // fiber stuck here instead - it means guest code is spinning under the global
-  // lock, which the lock's own holder has to resolve.
+  // A co-resident fiber would re-enter the recursive lock on this host thread
+  // and silently break mutual exclusion, which is why the switch waits. Report
+  // a fiber stuck here instead - it means guest code is spinning under the
+  // global lock, which the lock's own holder has to resolve.
   if (xe::global_critical_region::is_held_by_current_thread()) {
     context->preempt_requested = 1;
     if (++links.preempt_defers_lock == kLockPreemptDeferReport) {
@@ -189,17 +189,22 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
     return;
   }
   links.preempt_defers_lock = 0;
-  // At DISPATCH_LEVEL the console masks the decrementer, but it also runs the
-  // lock holder on another core. Here the holder may be a fiber queued behind
-  // this one, so honoring the mask indefinitely livelocks. Defer a bounded
-  // number of times, then switch anyway - IRQL still orders guest APCs.
+  // At DISPATCH_LEVEL the console defers a switch, for the quantum or a readied
+  // thread alike, until IRQL drops below DISPATCH_LEVEL. A DPC runs to
+  // completion before anything else on its processor. Host teardown has no
+  // console counterpart and doesn't wait.
   auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
   // User code runs at PASSIVE_LEVEL and its r13 is not the KPCR.
   const bool in_user_code =
       self->user_mode() && self->user_mode()->in_user_code;
   bool forced_at_irql = false;
-  if (!in_user_code && kpcr->current_irql >= 2) {
-    if (++links.preempt_defers_irql < kMaxIrqlPreemptDefers) {
+  if (!in_user_code && kpcr->current_irql >= 2 &&
+      !self->kernel_state()->guest_scheduler()->shutting_down()) {
+    // The console runs the other CPUs' threads in parallel, so a spin here on
+    // one of them ends. With guest CPUs sharing dispatch threads, that thread
+    // may be queued behind this one, so only then is the defer bounded.
+    if (++links.preempt_defers_irql < kMaxIrqlPreemptDefers ||
+        !GuestScheduler::DispatchThreadsShared()) {
       context->preempt_requested = 1;
       return;
     }
@@ -209,7 +214,8 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
       links.forced_preempt_logged = true;
       XELOGW(
           "GuestScheduler: forcing preemption of tid={:08X} '{}' at IRQL {} "
-          "after {} declined safepoints (first time for this thread)",
+          "after {} declined safepoints, guest CPUs sharing dispatch threads "
+          "(first time for this thread)",
           self->thread_id(), self->thread_name(), uint32_t(kpcr->current_irql),
           links.preempt_defers_irql);
     }
@@ -221,8 +227,8 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
     self->SaveInterruptedUserCr();
   }
   // Involuntary quantum end, so no yield to a lower-priority thread - except
-  // on the forced path, where the whole point is to reach a holder the strict
-  // priority order would keep queued behind us.
+  // on the forced path, where the point is to reach a holder the strict
+  // priority order would keep queued behind this one.
   self->kernel_state()->guest_scheduler()->YieldCurrentThread(true,
                                                               forced_at_irql);
   if (in_user_code) {
@@ -290,6 +296,14 @@ GuestScheduler::GuestScheduler(KernelState* kernel_state)
 GuestScheduler::~GuestScheduler() { Shutdown(); }
 
 bool GuestScheduler::enabled() { return cvars::guest_scheduler; }
+
+bool GuestScheduler::DispatchThreadsShared() {
+  return cvars::guest_scheduler_dispatch_cpus < uint32_t(kMaxCpus);
+}
+
+void GuestScheduler::NoteForcedPreempt() {
+  stats_.forced_preempts.fetch_add(1, std::memory_order_relaxed);
+}
 
 int GuestScheduler::DispatchCpuOf(uint8_t guest_cpu) const {
   // Wrap rather than fold to 0: an out-of-range guest CPU is already unusual,
@@ -1816,10 +1830,6 @@ void GuestScheduler::EnterBackgroundMode() {
   }
 }
 
-void GuestScheduler::NoteForcedPreempt() {
-  stats_.forced_preempts.fetch_add(1, std::memory_order_relaxed);
-}
-
 void GuestScheduler::ReportStatsIfDue() {
   if (!cvars::guest_scheduler_stats) {
     return;
@@ -2049,8 +2059,8 @@ void GuestScheduler::WatchdogLoop() {
       }
       // Stall detector: a dispatch count that has not moved for a whole
       // window separates the wedge modes - flag still set means the fiber
-      // never reaches a safepoint, flag cleared means it yields but makes no
-      // progress.
+      // never reaches a safepoint or declines each one (see irql_defers and
+      // lock_defers), flag cleared means it yields but makes no progress.
       uint64_t seq = cpus_[i].switch_seq.load(std::memory_order_relaxed);
       if (!running || seq != stall_last_seq_[i]) {
         stall_last_seq_[i] = seq;
