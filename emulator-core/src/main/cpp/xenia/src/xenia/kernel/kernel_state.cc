@@ -169,9 +169,10 @@ void KernelState::RunBlockingIo(const std::function<void()>& fn,
       // alertable wait, after the caller writes its status block.
       wait_alertable = 0;
     } else if (status != X_STATUS_SUCCESS) {
-      // A failed poll does not wait so give up the CPU instead of spinning.
+      // A failed poll does not wait so park until the next re-poll instead of
+      // spinning.
       XELOGW("KernelState: blocking I/O wait returned {:08X}", status);
-      guest_scheduler_->YieldCurrentThread(false);
+      guest_scheduler_->BlockCurrentThread(0, 0, false, false);
     }
   }
   ReleaseIoEvent(std::move(event));
