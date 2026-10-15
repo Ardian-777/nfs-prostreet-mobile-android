@@ -356,8 +356,12 @@ void XmaContextMaster::Decode(XMA_CONTEXT_DATA* data) {
       data->output_buffer_write_offset * kBytesPerSubframeChannel;
 
   RingBuffer output_rb(output_buffer, output_capacity);
-  output_rb.set_read_offset(output_read_offset);
-  output_rb.set_write_offset(output_write_offset);
+  // The offsets wrap modulo the capacity, so skip them for an empty buffer,
+  // which titles can set and which leaves nothing to write below.
+  if (output_capacity) {
+    output_rb.set_read_offset(output_read_offset);
+    output_rb.set_write_offset(output_write_offset);
+  }
 
   // We can only decode an entire frame and write it out at a time, so
   // don't save any samples.
