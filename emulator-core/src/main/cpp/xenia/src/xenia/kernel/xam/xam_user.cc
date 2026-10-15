@@ -772,11 +772,13 @@ dword_result_t XamReadTile_entry(dword_t tile_type, dword_t title_id,
       result = X_ERROR_FILE_NOT_FOUND;
     }
 
+    // The size is in/out: the buffer capacity in, the tile size out.
+    const uint32_t buffer_capacity = *buffer_size_ptr;
     *buffer_size_ptr = static_cast<uint32_t>(tile.size());
 
-    if (output_ptr) {
+    if (output_ptr && buffer_capacity >= tile.size()) {
       memcpy(output_ptr, tile.data(), tile.size());
-    } else {
+    } else if (result == X_ERROR_SUCCESS) {
       result = X_ERROR_INSUFFICIENT_BUFFER;
     }
 
