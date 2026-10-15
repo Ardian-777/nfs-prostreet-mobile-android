@@ -82,6 +82,10 @@ XContentContainerDevice::Result SvodContainerDevice::Read() {
   // SVOD Systems can have different layouts. The root block is
   // denoted by the magic "MICROSOFT*XBOX*MEDIA" and is always in
   // the first "actual" data fragment of the system.
+  if (!files_.contains(0)) {
+    XELOGE("SVOD has no data files");
+    return Result::kFileMismatch;
+  }
   auto& svod_header = files_.at(0);
 
   size_t magic_offset = 0;
