@@ -71,6 +71,7 @@
 #include "xenia/vfs/entry.h"
 #include "xenia/vfs/file.h"
 #include "xenia/vfs/virtual_file_system.h"
+#include "xenia/vfs/xex_metadata.h"
 
 #if XE_PLATFORM_xendroid
 #include "third_party/zarchive/include/zarchive/zarchivecommon.h"
@@ -519,8 +520,12 @@ const std::unique_ptr<vfs::Device> Emulator::CreateVfsDevice(
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
+      // An unpacked package's executable says where it came from, wherever
+      // the files now are.
+      auto xex = vfs::ExtractXexMetadata(path);
       device = std::make_unique<vfs::HostPathDevice>(
-          mount_path, path.parent_path(), !cvars::allow_game_relative_writes);
+          mount_path, path.parent_path(), !cvars::allow_game_relative_writes,
+          false, xex && xex->RunsFromPackageOnly() ? "STFS" : "GDFX");
     } break;
     case FileSignatureType::LIVE:
     case FileSignatureType::CON:

@@ -40,18 +40,26 @@ static void WriteIoStatus(X_IO_STATUS_BLOCK* status_block, X_STATUS status,
   status_block->status = status;
 }
 
-// File-pointer reads (offset -1), reads at or past EOF and reads issued with an
-// APC from a user APC routine complete inline.
-static bool CompletesAsync(XFile* file, uint64_t byte_offset, XThread* thread,
-                           bool queues_apc) {
-  if (file->is_synchronous() || byte_offset >= file->entry()->size()) {
+// Without a driver that queues every read, a zero-length read, a read at or
+// past EOF and a buffered read complete inline. So does a request issued from
+// a user APC routine whose completion routine upstream queues as a kernel APC
+// (bit 0 clear): here it is a user APC, and pending it would queue it after
+// the delivery that issued the request had ended, for a title that then only
+// sleeps non-alertably (Cars chains its reads that way).
+static bool CompletesAsync(XFile* file, uint32_t length, uint64_t byte_offset,
+                           XThread* thread, uint32_t apc_routine,
+                           uint32_t apc_context) {
+  if (file->is_synchronous()) {
     return false;
   }
-  // TODO(has207): Likely not hardware accurate. Cars chains ReadFileEx from its
-  // completion routine, then only sleeps non-alertably. Completing inline
-  // queues the APC while the current delivery loop still drains the list. How
-  // the console delivers it is unknown.
-  return !(queues_apc && thread->in_user_apc());
+  if (QueuesApc(apc_routine, apc_context) && !(apc_routine & 1) &&
+      thread->in_user_apc()) {
+    return false;
+  }
+  if (file->device()->queues_all_reads()) {
+    return true;
+  }
+  return !file->is_buffered() && length && byte_offset < file->entry()->size();
 }
 
 struct CreateOptions {
@@ -59,6 +67,7 @@ struct CreateOptions {
   static constexpr uint32_t FILE_DIRECTORY_FILE = 0x00000001;
   // Optimization - files access will be sequential, not random.
   static constexpr uint32_t FILE_SEQUENTIAL_ONLY = 0x00000004;
+  static constexpr uint32_t FILE_NO_INTERMEDIATE_BUFFERING = 0x00000008;
   static constexpr uint32_t FILE_SYNCHRONOUS_IO_ALERT = 0x00000010;
   static constexpr uint32_t FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020;
   static constexpr uint32_t FILE_NON_DIRECTORY_FILE = 0x00000040;
@@ -165,8 +174,10 @@ dword_result_t IoCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
     bool synchronous =
         alertable ||
         (create_options & CreateOptions::FILE_SYNCHRONOUS_IO_NONALERT);
+    bool buffered =
+        !(create_options & CreateOptions::FILE_NO_INTERMEDIATE_BUFFERING);
     file = object_ref<XFile>(
-        new XFile(kernel_state(), vfs_file, synchronous, alertable));
+        new XFile(kernel_state(), vfs_file, synchronous, alertable, buffered));
 
     // Handle ref is incremented, so return that.
     handle = file->handle();
@@ -271,6 +282,10 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
       uint32_t bytes_read = 0;
       X_STATUS status = file->Read(buffer_address, length, byte_offset,
                                    &bytes_read, apc_context_address, false);
+      // A failure the caller was not told PENDING for completes nothing.
+      if (!posted && XFAILED(status)) {
+        return status;
+      }
       if (XSUCCEEDED(status)) {
         if (auto patch = kernel_state()->xmp_volume_patch()) {
           auto host_buf = kernel_memory()->TranslateVirtual(buffer_address);
@@ -281,11 +296,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
       if (status_block) {
         WriteIoStatus(status_block, status, bytes_read);
       }
-      // A caller told PENDING always gets its APC, as on NT.
-      bool pending =
-          posted || (!file->is_synchronous() && status != X_STATUS_END_OF_FILE);
-      if (QueuesApc(apc_routine, apc_context_address) &&
-          (pending || status == X_STATUS_SUCCESS)) {
+      if (QueuesApc(apc_routine, apc_context_address)) {
         thread->EnqueueApc(apc_routine & ~1u, apc_context_address,
                            status_block_address, 0);
       }
@@ -296,8 +307,8 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
       return status;
     };
 
-    if (CompletesAsync(file.get(), byte_offset, thread.get(),
-                       QueuesApc(apc_routine, apc_context_address))) {
+    if (CompletesAsync(file.get(), length, byte_offset, thread.get(),
+                       apc_routine, apc_context_address)) {
       if (ev) {
         ev->Reset();
       }
@@ -309,15 +320,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
       result = X_STATUS_PENDING;
     } else {
       result = complete(false);
-      if (!file->is_synchronous() && result != X_STATUS_END_OF_FILE) {
-        result = X_STATUS_PENDING;
-      }
     }
-  }
-
-  if (XFAILED(result) && io_status_block) {
-    io_status_block->status = result;
-    io_status_block->information = 0;
   }
 
   return result;
@@ -354,11 +357,15 @@ dword_result_t NtReadFileScatter_entry(
     auto thread = retain_object(XThread::GetCurrentThread());
     auto complete = [file, ev, thread, segments_address, read_length,
                      byte_offset, apc_routine, apc_context_address,
-                     status_block, status_block_address]() {
+                     status_block, status_block_address](bool posted) {
       uint32_t bytes_read = 0;
       X_STATUS status =
           file->ReadScatter(segments_address, read_length, byte_offset,
                             &bytes_read, apc_context_address, false);
+      // A failure the caller was not told PENDING for completes nothing.
+      if (!posted && XFAILED(status)) {
+        return status;
+      }
       if (status_block) {
         WriteIoStatus(status_block, status, bytes_read);
       }
@@ -373,8 +380,8 @@ dword_result_t NtReadFileScatter_entry(
       return status;
     };
 
-    if (CompletesAsync(file.get(), byte_offset, thread.get(),
-                       QueuesApc(apc_routine, apc_context_address))) {
+    if (CompletesAsync(file.get(), read_length, byte_offset, thread.get(),
+                       apc_routine, apc_context_address)) {
       if (ev) {
         ev->Reset();
       }
@@ -382,19 +389,11 @@ dword_result_t NtReadFileScatter_entry(
         status_block->status = X_STATUS_PENDING;
         status_block->information = 0;
       }
-      file->PostIo(std::move(complete));
+      file->PostIo([complete = std::move(complete)]() { complete(true); });
       result = X_STATUS_PENDING;
     } else {
-      result = complete();
-      if (!file->is_synchronous()) {
-        result = X_STATUS_PENDING;
-      }
+      result = complete(false);
     }
-  }
-
-  if (XFAILED(result) && io_status_block) {
-    io_status_block->status = result;
-    io_status_block->information = 0;
   }
 
   return result;
