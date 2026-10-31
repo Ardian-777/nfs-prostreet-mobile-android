@@ -373,6 +373,10 @@ dword_result_t NtReadFileScatter_entry(
   uint64_t byte_offset = 0;
   if (!file) {
     result = X_STATUS_INVALID_HANDLE;
+  } else if (XSUCCEEDED(result) &&
+             (file->is_buffered() || file->device()->name() == "STFS")) {
+    // Scatter reads need an unbuffered handle. STFS takes none.
+    result = X_STATUS_INVALID_PARAMETER;
   } else if (XSUCCEEDED(result)) {
     result = ValidateRequest(file.get(), static_cast<uint32_t>(apc_routine_ptr),
                              byte_offset_ptr, false, &byte_offset);
