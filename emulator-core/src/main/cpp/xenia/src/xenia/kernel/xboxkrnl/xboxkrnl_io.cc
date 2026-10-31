@@ -115,9 +115,13 @@ static X_STATUS SubmitRequest(const object_ref<XFile>& file,
     ev->Reset();
   }
   file->ResetWaitState();
-  auto complete = [file, ev, thread, apc_routine, apc_context, status_block,
-                   status_block_address, transfer = std::move(transfer)](
-                      bool posted, bool cancelled) {
+  // The file by plain pointer: a pending request is queued on the file itself,
+  // and a reference there would keep the file alive through a shutdown that
+  // drops the queue's worker call. Whoever runs the request holds one.
+  auto complete = [file = file.get(), ev, thread, apc_routine, apc_context,
+                   status_block, status_block_address,
+                   transfer = std::move(transfer)](bool posted,
+                                                   bool cancelled) {
     uint32_t bytes = 0;
     X_STATUS status = cancelled ? X_STATUS_CANCELLED : transfer(&bytes);
     // A failure the caller was not told PENDING for completes nothing.
@@ -339,7 +343,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
         file, ev, static_cast<uint32_t>(apc_routine_ptr), apc_context_address,
         io_status_block, io_status_block.guest_address(),
         CompletesAsync(file.get(), length, byte_offset, false),
-        [file, buffer_address, length, byte_offset,
+        [file = file.get(), buffer_address, length, byte_offset,
          apc_context_address](uint32_t* bytes_read) {
           X_STATUS status = file->Read(buffer_address, length, byte_offset,
                                        bytes_read, apc_context_address, false);
@@ -390,7 +394,7 @@ dword_result_t NtReadFileScatter_entry(
         file, ev, static_cast<uint32_t>(apc_routine_ptr), apc_context_address,
         io_status_block, io_status_block.guest_address(),
         CompletesAsync(file.get(), read_length, byte_offset, false),
-        [file, segments_address, read_length, byte_offset,
+        [file = file.get(), segments_address, read_length, byte_offset,
          apc_context_address](uint32_t* bytes_read) {
           return file->ReadScatter(segments_address, read_length, byte_offset,
                                    bytes_read, apc_context_address, false);
@@ -430,7 +434,7 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
         file, ev, apc_routine, apc_context_address, io_status_block,
         io_status_block.guest_address(),
         CompletesAsync(file.get(), length, byte_offset, true),
-        [file, buffer_address, length, byte_offset,
+        [file = file.get(), buffer_address, length, byte_offset,
          apc_context_address](uint32_t* bytes_written) {
           X_STATUS status =
               file->Write(buffer_address, length, byte_offset, bytes_written,
