@@ -320,6 +320,11 @@ void XFile::AwaitDriveTime(uint64_t deadline_ms) {
   // The deadline is host time, so it must not pass through a guest-duration
   // API like XThread::Delay, which scales by the guest time scalar.
   auto* scheduler = kernel_state()->guest_scheduler();
+  const uint64_t now = Clock::QueryHostUptimeMillis();
+  if (now >= deadline_ms) {
+    return;
+  }
+  scheduler->NoteDriveWait(deadline_ms - now);
   self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kDelay,
                                    nullptr, 0);
   while (Clock::QueryHostUptimeMillis() < deadline_ms) {

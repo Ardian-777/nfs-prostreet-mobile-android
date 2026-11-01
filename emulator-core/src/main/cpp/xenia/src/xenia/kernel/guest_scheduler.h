@@ -118,6 +118,22 @@ class GuestScheduler {
   // Counts a safepoint preemption forced through a deferring IRQL.
   void NoteForcedPreempt();
 
+  // Counters for the guest_scheduler_stats report. Each returns at once while
+  // it is off.
+  // A fiber parked |ms| for the storage request timing model.
+  void NoteDriveWait(uint64_t ms);
+  enum class FileRequestEvent {
+    kPended,
+    kCancelled,
+    // Completed inline only because a user APC routine issued it.
+    kApcInline,
+  };
+  void NoteFileRequest(FileRequestEvent event);
+  // A fiber parked |ticks| raw host ticks in KernelState::RunBlockingIo.
+  void NoteBlockingIoPark(uint64_t ticks);
+  // A DPC targeted at a processor ran |ticks| raw host ticks.
+  void NoteTargetedDpc(uint64_t ticks);
+
   bool shutting_down() const { return shutting_down_.load(); }
 
   // Waits on a host Fence. On a fiber it polls and parks instead of blocking
@@ -224,6 +240,8 @@ class GuestScheduler {
     XThread* suspended_tail = nullptr;
     XThread* exited_thread = nullptr;
     std::unique_ptr<xe::threading::Thread> host_thread;
+    // Host thread id, for the report of where each thread runs.
+    std::atomic<uint32_t> host_tid{0};
     std::unique_ptr<xe::threading::Fiber> idle_fiber;
     std::unique_ptr<xe::threading::Event> ready_event;
     // Hint read lock-free by WakeAll so it only wakes CPUs with a parked
@@ -297,7 +315,7 @@ class GuestScheduler {
   bool EnqueuePoolCall(BlockingCall* call);
   // Caller holds io_pool_lock_.
   void StartPoolWorkerLocked();
-  void IoPoolWorkerLoop();
+  void IoPoolWorkerLoop(size_t index);
   // Runs one queued call, accumulates its counters and frees it.
   void RunBlockingCall(BlockingCall* call);
   // Unlinks |thread| from a singly-linked list (ready_next), fixing up tail.
@@ -409,6 +427,21 @@ class GuestScheduler {
     // Most pool workers inside a call at once. Queue wait cannot show this.
     // An idle worker takes a call immediately, so it stays low either way.
     std::atomic<uint64_t> io_peak_inflight{0};
+    // Waits the storage request timing model added, in host ms.
+    std::atomic<uint64_t> drive_waits{0};
+    std::atomic<uint64_t> drive_wait_ms{0};
+    std::atomic<uint64_t> drive_wait_max_ms{0};
+    std::atomic<uint64_t> file_pended{0};
+    std::atomic<uint64_t> file_cancelled{0};
+    std::atomic<uint64_t> file_apc_inline{0};
+    // How long a fiber stays parked in RunBlockingIo: the queue and the call
+    // above, plus the wake back onto its dispatch thread.
+    std::atomic<uint64_t> io_parks{0};
+    std::atomic<uint64_t> io_park_ticks{0};
+    std::atomic<uint64_t> io_park_max_ticks{0};
+    // Without a bound on the IRQL defer, a long DPC holds its CPU this long.
+    std::atomic<uint64_t> targeted_dpcs{0};
+    std::atomic<uint64_t> targeted_dpc_max_ticks{0};
   };
   Stats stats_;
   uint64_t stats_last_report_ms_ = 0;
@@ -439,6 +472,14 @@ class GuestScheduler {
   size_t io_pool_busy_ = 0;
   // Mirrors io_pool_threads_.size() so the stats report skips io_pool_lock_.
   std::atomic<size_t> io_pool_size_{0};
+
+  // Host thread ids of the I/O workers, and the CPU time each thread had used
+  // at the last report (dispatch threads, then the serial worker, then the
+  // pool), for the report of where each thread runs.
+  std::atomic<uint32_t> io_thread_tid_{0};
+  std::atomic<uint32_t> io_pool_tids_[kMaxIoPoolThreads]{};
+  uint64_t stats_thread_cpu_ticks_[kMaxCpus + 1 + kMaxIoPoolThreads] = {};
+  void ReportThreadPlacement(uint64_t interval_ms);
 };
 
 }  // namespace kernel

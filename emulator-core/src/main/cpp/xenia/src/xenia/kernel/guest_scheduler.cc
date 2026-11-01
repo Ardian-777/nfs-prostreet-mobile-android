@@ -10,8 +10,15 @@
 #include "xenia/kernel/guest_scheduler.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
+
+#if XE_PLATFORM_LINUX
+#include <unistd.h>
+#endif
 
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -39,8 +46,14 @@ DEFINE_uint32(
 DEFINE_bool(
     guest_scheduler_stats, false,
     "Log guest scheduler counters once a second: blocked-waiter re-poll rate, "
-    "fiber switches, yields, and how long offloaded blocking calls queue "
-    "behind the single I/O worker.",
+    "fiber switches, yields, how long offloaded blocking calls queue and run, "
+    "file request and storage timing waits, and the host core and load of "
+    "each scheduler thread.",
+    "Kernel");
+DEFINE_uint32(
+    guest_scheduler_io_pool_threads, 4,
+    "Most I/O pool workers, 1-4, for the storage reads that may overlap. A "
+    "diagnostic for comparing a single worker with the default.",
     "Kernel");
 DEFINE_uint32(
     guest_scheduler_dispatch_cpus, 6,
@@ -303,6 +316,49 @@ bool GuestScheduler::DispatchThreadsShared() {
 
 void GuestScheduler::NoteForcedPreempt() {
   stats_.forced_preempts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void GuestScheduler::NoteDriveWait(uint64_t ms) {
+  if (!cvars::guest_scheduler_stats) {
+    return;
+  }
+  stats_.drive_waits.fetch_add(1, std::memory_order_relaxed);
+  stats_.drive_wait_ms.fetch_add(ms, std::memory_order_relaxed);
+  AccumulateMax(stats_.drive_wait_max_ms, ms);
+}
+
+void GuestScheduler::NoteFileRequest(FileRequestEvent event) {
+  if (!cvars::guest_scheduler_stats) {
+    return;
+  }
+  switch (event) {
+    case FileRequestEvent::kPended:
+      stats_.file_pended.fetch_add(1, std::memory_order_relaxed);
+      break;
+    case FileRequestEvent::kCancelled:
+      stats_.file_cancelled.fetch_add(1, std::memory_order_relaxed);
+      break;
+    case FileRequestEvent::kApcInline:
+      stats_.file_apc_inline.fetch_add(1, std::memory_order_relaxed);
+      break;
+  }
+}
+
+void GuestScheduler::NoteBlockingIoPark(uint64_t ticks) {
+  if (!cvars::guest_scheduler_stats) {
+    return;
+  }
+  stats_.io_parks.fetch_add(1, std::memory_order_relaxed);
+  stats_.io_park_ticks.fetch_add(ticks, std::memory_order_relaxed);
+  AccumulateMax(stats_.io_park_max_ticks, ticks);
+}
+
+void GuestScheduler::NoteTargetedDpc(uint64_t ticks) {
+  if (!cvars::guest_scheduler_stats) {
+    return;
+  }
+  stats_.targeted_dpcs.fetch_add(1, std::memory_order_relaxed);
+  AccumulateMax(stats_.targeted_dpc_max_ticks, ticks);
 }
 
 int GuestScheduler::DispatchCpuOf(uint8_t guest_cpu) const {
@@ -1254,6 +1310,8 @@ void GuestScheduler::RunBlockingCall(BlockingCall* call) {
 }
 
 void GuestScheduler::IoWorkerLoop() {
+  io_thread_tid_.store(xe::threading::current_thread_system_id(),
+                       std::memory_order_relaxed);
   while (!shutting_down_.load()) {
     BlockingCall* call = nullptr;
     {
@@ -1273,10 +1331,10 @@ void GuestScheduler::IoWorkerLoop() {
 
 void GuestScheduler::StartPoolWorkerLocked() {
   xe::threading::Thread::CreationParameters params;
-  auto thread =
-      xe::threading::Thread::Create(params, [this]() { IoPoolWorkerLoop(); });
-  thread->set_name(std::string("Guest I/O ") +
-                   std::to_string(io_pool_threads_.size()));
+  const size_t index = io_pool_threads_.size();
+  auto thread = xe::threading::Thread::Create(
+      params, [this, index]() { IoPoolWorkerLoop(index); });
+  thread->set_name(std::string("Guest I/O ") + std::to_string(index));
   io_pool_threads_.push_back(std::move(thread));
   io_pool_size_.store(io_pool_threads_.size(), std::memory_order_relaxed);
   io_started_.store(true);
@@ -1292,8 +1350,10 @@ bool GuestScheduler::EnqueuePoolCall(BlockingCall* call) {
     // Queued work counts as well as running work. In a burst every call can
     // arrive before a worker has picked any up, and a busy count alone would
     // see an idle pool and never grow it.
+    const size_t max_threads = std::clamp<size_t>(
+        cvars::guest_scheduler_io_pool_threads, 1, kMaxIoPoolThreads);
     if (io_pool_busy_ + io_pool_queue_.size() > io_pool_threads_.size() &&
-        io_pool_threads_.size() < kMaxIoPoolThreads) {
+        io_pool_threads_.size() < max_threads) {
       StartPoolWorkerLocked();
     }
   }
@@ -1301,7 +1361,9 @@ bool GuestScheduler::EnqueuePoolCall(BlockingCall* call) {
   return true;
 }
 
-void GuestScheduler::IoPoolWorkerLoop() {
+void GuestScheduler::IoPoolWorkerLoop(size_t index) {
+  io_pool_tids_[index].store(xe::threading::current_thread_system_id(),
+                             std::memory_order_relaxed);
   std::unique_lock<std::mutex> lock(io_pool_lock_);
   while (!shutting_down_.load()) {
     if (io_pool_queue_.empty()) {
@@ -1681,6 +1743,8 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
 void GuestScheduler::RunLoop(int cpu_index) {
   t_current_cpu = cpu_index;
   Cpu& cpu = cpus_[cpu_index];
+  cpu.host_tid.store(xe::threading::current_thread_system_id(),
+                     std::memory_order_relaxed);
   // Adopt this host thread's stack as this CPU's idle fiber.
   cpu.idle_fiber = xe::threading::Fiber::CreateFromThread();
   XELOGI("GuestScheduler: CPU {} dispatch loop started", cpu_index);
@@ -1838,6 +1902,7 @@ void GuestScheduler::ReportStatsIfDue() {
   if (now_ms - stats_last_report_ms_ < 1000) {
     return;
   }
+  const uint64_t interval_ms = now_ms - stats_last_report_ms_;
   stats_last_report_ms_ = now_ms;
   auto take = [](std::atomic<uint64_t>& v) {
     return v.exchange(0, std::memory_order_relaxed);
@@ -1876,6 +1941,89 @@ void GuestScheduler::ReportStatsIfDue() {
       io_calls ? to_us(io_queue / io_calls) : 0, to_us(io_queue_max),
       io_calls ? to_us(io_run / io_calls) : 0,
       io_pool_size_.load(std::memory_order_relaxed), io_peak);
+  uint64_t drive_waits = take(stats_.drive_waits);
+  uint64_t drive_ms = take(stats_.drive_wait_ms);
+  uint64_t drive_max_ms = take(stats_.drive_wait_max_ms);
+  uint64_t pended = take(stats_.file_pended);
+  uint64_t cancelled = take(stats_.file_cancelled);
+  uint64_t apc_inline = take(stats_.file_apc_inline);
+  uint64_t parks = take(stats_.io_parks);
+  uint64_t park_ticks = take(stats_.io_park_ticks);
+  uint64_t park_max = take(stats_.io_park_max_ticks);
+  uint64_t dpcs = take(stats_.targeted_dpcs);
+  uint64_t dpc_max = take(stats_.targeted_dpc_max_ticks);
+  XELOGI(
+      "GuestScheduler: storage timing waits {} (avg {} ms, max {} ms), file "
+      "requests pended {} cancelled {} inline from a user APC {}, I/O parks "
+      "{} (avg {} us, max {} us), targeted DPCs {} (max {} us)",
+      drive_waits, drive_waits ? drive_ms / drive_waits : 0, drive_max_ms,
+      pended, cancelled, apc_inline, parks,
+      parks ? to_us(park_ticks / parks) : 0, to_us(park_max), dpcs,
+      to_us(dpc_max));
+  ReportThreadPlacement(interval_ms);
+}
+
+// The host core each scheduler thread last ran on, and its load since the
+// previous report, from /proc. On a big.LITTLE SoC this shows whether the
+// dispatch threads got the big cores.
+void GuestScheduler::ReportThreadPlacement(uint64_t interval_ms) {
+#if XE_PLATFORM_LINUX
+  static const long clock_ticks = sysconf(_SC_CLK_TCK);
+  std::string line;
+  size_t slot = 0;
+  auto add = [&](const std::string& label, uint32_t tid) {
+    uint64_t& last_ticks = stats_thread_cpu_ticks_[slot++];
+    if (!tid) {
+      return;
+    }
+    char path[48];
+    std::snprintf(path, sizeof(path), "/proc/self/task/%u/stat", tid);
+    FILE* file = std::fopen(path, "r");
+    if (!file) {
+      return;
+    }
+    char buf[512];
+    size_t length = std::fread(buf, 1, sizeof(buf) - 1, file);
+    std::fclose(file);
+    buf[length] = '\0';
+    // The fields after the name, which is in parentheses and may hold spaces,
+    // start at field 3: utime is field 14, stime 15, processor 39.
+    char* fields = std::strrchr(buf, ')');
+    if (!fields || !fields[1]) {
+      return;
+    }
+    uint64_t ticks = 0;
+    int core = -1;
+    char* save = nullptr;
+    int field = 3;
+    for (char* token = strtok_r(fields + 2, " ", &save); token;
+         token = strtok_r(nullptr, " ", &save), ++field) {
+      if (field == 14 || field == 15) {
+        ticks += std::strtoull(token, nullptr, 10);
+      } else if (field == 39) {
+        core = std::atoi(token);
+        break;
+      }
+    }
+    uint64_t load = 0;
+    if (last_ticks && clock_ticks > 0 && interval_ms) {
+      load = (ticks - last_ticks) * 100000 /
+             (uint64_t(clock_ticks) * interval_ms);
+    }
+    last_ticks = ticks;
+    line += fmt::format(" {}@{} {}%", label, core, load);
+  };
+  for (int i = 0; i < kMaxCpus; ++i) {
+    add("cpu" + std::to_string(i),
+        cpus_[i].host_tid.load(std::memory_order_relaxed));
+  }
+  add("io", io_thread_tid_.load(std::memory_order_relaxed));
+  for (size_t i = 0; i < kMaxIoPoolThreads; ++i) {
+    add("pool" + std::to_string(i),
+        io_pool_tids_[i].load(std::memory_order_relaxed));
+  }
+  XELOGI("GuestScheduler: threads (core, load):{}", line);
+#endif  // XE_PLATFORM_LINUX
 }
 
 // Names what a fiber is parked on, for the no-progress dump.

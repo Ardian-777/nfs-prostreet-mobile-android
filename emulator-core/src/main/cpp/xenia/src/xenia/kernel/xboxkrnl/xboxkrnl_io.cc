@@ -106,9 +106,11 @@ static X_STATUS SubmitRequest(const object_ref<XFile>& file,
   // queue it after the delivery that issued the request had ended, for a title
   // that then only sleeps non-alertably (Cars chains its reads that way), so
   // such a request completes inline.
+  auto* scheduler = kernel_state()->guest_scheduler();
   if (pends && QueuesApc(apc_routine, apc_context) && !(apc_routine & 1) &&
       thread->in_user_apc()) {
     pends = false;
+    scheduler->NoteFileRequest(GuestScheduler::FileRequestEvent::kApcInline);
   }
   // Cleared at issue, so a wait cannot return on an earlier completion.
   if (ev) {
@@ -119,9 +121,12 @@ static X_STATUS SubmitRequest(const object_ref<XFile>& file,
   // and a reference there would keep the file alive through a shutdown that
   // drops the queue's worker call. Whoever runs the request holds one.
   auto complete = [file = file.get(), ev, thread, apc_routine, apc_context,
-                   status_block, status_block_address,
+                   status_block, status_block_address, scheduler,
                    transfer = std::move(transfer)](bool posted,
                                                    bool cancelled) {
+    if (cancelled) {
+      scheduler->NoteFileRequest(GuestScheduler::FileRequestEvent::kCancelled);
+    }
     uint32_t bytes = 0;
     X_STATUS status = cancelled ? X_STATUS_CANCELLED : transfer(&bytes);
     // A failure the caller was not told PENDING for completes nothing.
@@ -142,6 +147,7 @@ static X_STATUS SubmitRequest(const object_ref<XFile>& file,
     return status;
   };
   if (pends) {
+    scheduler->NoteFileRequest(GuestScheduler::FileRequestEvent::kPended);
     if (status_block) {
       status_block->status = X_STATUS_PENDING;
       status_block->information = 0;

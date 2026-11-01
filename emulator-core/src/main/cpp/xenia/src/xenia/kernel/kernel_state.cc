@@ -150,6 +150,7 @@ void KernelState::RunBlockingIo(const std::function<void()>& fn,
     return;
   }
   auto event = AcquireIoEvent();
+  const uint64_t parked_at = Clock::host_tick_count_raw();
   // The worker writes into this frame so only |done| ends the wait, even on a
   // terminate.
   std::atomic<bool> done{false};
@@ -175,6 +176,8 @@ void KernelState::RunBlockingIo(const std::function<void()>& fn,
       guest_scheduler_->BlockCurrentThread(0, 0, false, false);
     }
   }
+  guest_scheduler_->NoteBlockingIoPark(Clock::host_tick_count_raw() -
+                                       parked_at);
   ReleaseIoEvent(std::move(event));
 }
 
@@ -1575,7 +1578,10 @@ void KernelState::RunProcessorDpcs(uint8_t cpu) {
         arg1 = dpc->arg1;
         arg2 = dpc->arg2;
       }
+      const uint64_t started = Clock::host_tick_count_raw();
       xboxkrnl::xeRunDpc(context, dpc_ptr, arg1, arg2);
+      guest_scheduler_->NoteTargetedDpc(Clock::host_tick_count_raw() -
+                                        started);
     }
     EndDPCImpersonation(context, dpc_scope);
   }
