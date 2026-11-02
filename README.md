@@ -46,9 +46,9 @@ and performance and accuracy work measured frame by frame on real hardware.
 - **Fewer EDRAM transfers** on the host GPU: transfers a draw overwrites are skipped,
   and in the games that allow it, depth drawn at 4× MSAA lands straight in its 1×
   surface and predicated tiling bands are drawn once.
-- **Exact shader fast paths** (texture sign decoding, 21-bit rounding), texture loads
-  straight into images, direct host resolves, and Turnip's shader compiler set up for
-  many small draws.
+- **Exact shader fast paths** (texture sign decoding), texture loads straight into
+  images, direct host resolves, and Turnip's shader compiler set up for many small
+  draws.
 - **A lighter command thread**: resolves are copied back into game memory only once
   the game reads them, commands go out in small batches when the GPU runs out of work,
   and on Turnip the constant buffers use dynamic offsets and texture descriptor sets

@@ -434,6 +434,35 @@ constexpr float UNorm24To32(uint32_t n24) {
   return float(n24 + (n24 >> 23)) * (1.0f / float(1 << 24));
 }
 
+// The shader ALU's RCP, RSQ, SQRT, EXP and LOG each evaluate a cubic in the low
+// bits of the mantissa, or of the fraction for EXP, using the integer
+// coefficients of one of 32 segments.
+struct ScalarEstimate {
+  // Offset bits below a sticky bit that the square leaves out.
+  uint32_t square_input_shift;
+  uint32_t square_shift;
+  // How much coarser the square in the cubic term is.
+  uint32_t square_coarse_shift;
+  // Offset bits below the block that sets the cubic coefficient.
+  uint32_t block_shift;
+  uint32_t cubic_shift;
+  bool cubic_rounds_up;
+  // C0 and the magnitudes of C1, C2 and C3 of each segment. RSQ and SQRT use
+  // segments 16-31 for operands with an odd exponent.
+  uint32_t coefficients[32][4];
+};
+extern const ScalarEstimate kRcpEstimate;
+extern const ScalarEstimate kRsqEstimate;
+extern const ScalarEstimate kSqrtEstimate;
+extern const ScalarEstimate kExpEstimate;
+extern const ScalarEstimate kLogEstimate;
+// The scalar ALU ops as the console computes them, bit for bit.
+float Rcp(float value);
+float Rsq(float value);
+float Sqrt(float value);
+float Exp(float value);
+float Log(float value);
+
 // Scale for conversion of slope scales from PA_SU_POLY_OFFSET_FRONT/BACK_SCALE
 // units to those used when the slope is computed from the difference between
 // adjacent pixels, for conversion from the guest to common host APIs or to

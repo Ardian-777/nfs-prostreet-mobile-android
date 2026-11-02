@@ -85,6 +85,8 @@ DECLARE_bool(use_fuzzy_alpha_epsilon);
 
 DECLARE_bool(texture_gradient_exp_bias);
 
+DECLARE_bool(alu_round_toward_zero);
+
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_

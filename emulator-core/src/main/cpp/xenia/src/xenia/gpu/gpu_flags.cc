@@ -297,3 +297,15 @@ DEFINE_bool(
     "multiplies in every gradient texture fetch, which is measurable where "
     "fragment shading is the bottleneck.",
     "GPU");
+
+DEFINE_bool(
+    alu_round_toward_zero, true,
+    "Round vertex shader ALU sums and products toward zero, with unfused "
+    "multiply-adds and overflow saturating, instead of rounding to nearest "
+    "even. This is what the Xenos does and fixes bad geometry in several "
+    "Volition Engine titles. Pixel shaders keep rounding to nearest, the "
+    "extra instructions per operation are too slow there. Unless the host "
+    "GPU supports the rounding mode, vertex shaders only round results that "
+    "may reach a vertex fetch index, the address register, a memory export "
+    "or a floor, trunc or frc this way.",
+    "GPU");

@@ -455,6 +455,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     bool signed_zero_inf_nan_preserve_float32;
     bool denorm_flush_to_zero_float32;
     bool rounding_mode_rte_float32;
+    bool rounding_mode_rtz_float32 = false;
 
     bool fragment_shader_sample_interlock;
 
@@ -553,7 +554,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
   enum MathRelaxation : uint32_t {
     // No Shader Model 3 "0 * anything = 0" in multiplications.
     kMathRelaxationMultiplyZero = 1,
-    // No rounding to 21 mantissa bits after exp, log, sqrt, rsq and rcp.
+    // Vertex shaders take the host's exp, log, sqrt, rsq and rcp, and its
+    // rounding of sums and products, not the Xenos' (pixel shaders always do).
     kMathRelaxationPrecision = 2,
     // Texture fetches ignore the component signs (experiment, wrong colors).
     kMathRelaxationTextureSigns = 4,
@@ -882,11 +884,34 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // must be called with absolute values of operands - use GetAbsoluteOperand!
   spv::Id ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
                                  spv::Id operand_1_abs);
-  // Reduces floating-point precision by truncating mantissa bits with rounding.
-  // Used to match Xbox 360 Xenos GPU hardware approximation instructions
-  // (RCP, RSQ, EXP, LOG, SQRT) that provide ~2^-21 relative error tolerance
-  // instead of full IEEE-754 precision (equivalent to 21 vs 23 mantissa bits).
-  spv::Id ReduceFloatPrecision(spv::Id value, uint32_t mantissa_bits);
+  enum class ScalarEstimateOp : uint32_t {
+    kRcp,
+    kRsq,
+    kSqrt,
+    kExp,
+    kLog,
+  };
+  // The scalar op of a float, the same as xenos::Rcp, Rsq, Sqrt, Exp or Log for
+  // rounding-sensitive vertex shader results, and the host's elsewhere where
+  // the extra instructions cost too much, or with kMathRelaxationPrecision.
+  spv::Id ScalarEstimate(ScalarEstimateOp op, spv::Id value);
+  // Whether alu_round_toward_zero applies to the ALU operation being
+  // translated. Only in vertex shaders since the extra instructions per
+  // operation are too slow per pixel, and unless the rounding mode does it,
+  // only to rounding-sensitive results since they're too slow for all. Not
+  // with kMathRelaxationPrecision or contraction.
+  bool RoundsTowardZero() const;
+  // Whether the shader's rounding mode does it for the whole vertex shader,
+  // with no extra instructions.
+  bool RoundsTowardZeroInHardware() const;
+  // Guest ALU sums and products of floats or float vectors, rounded toward
+  // zero if RoundsTowardZero.
+  spv::Id AluAdd(spv::Id a, spv::Id b);
+  spv::Id AluSubtract(spv::Id a, spv::Id b);
+  spv::Id AluMultiply(spv::Id a, spv::Id b);
+  // Steps a sum or product of a and b rounded to nearest toward zero if its
+  // exact error shows it rounded away, and saturates overflow.
+  spv::Id RoundTowardZero(spv::Id rounded, spv::Id error, spv::Id a, spv::Id b);
   // Pack/unpack two floats as Xbox 360 extended-range float16, where exponent
   // 31 is a large finite value (up to +-131008), not Inf/NaN.
   spv::Id PackFloat16x2ExtendedRange(spv::Id float2_value);
@@ -1341,6 +1366,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // float3.
   spv::Id var_main_tfetch_gradients_h_;
   spv::Id var_main_tfetch_gradients_v_;
+  // uint4[32] coefficients for ScalarEstimate, created on first use.
+  std::array<spv::Id, size_t(ScalarEstimateOp::kLog) + 1>
+      var_main_estimate_coefficients_;
   // float4[register_count()].
   spv::Id var_main_registers_;
   // Memory export variables are created only when needed.
@@ -1436,6 +1464,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // the exec-level predicate value, and can't merge two execs with the same
   // predicate condition anymore.
   bool cf_exec_predicate_written_;
+
+  // Whether the result of the ALU operation being translated is
+  // rounding-sensitive (see Shader::IsAluVectorResultRoundingSensitive).
+  bool alu_op_result_rounding_sensitive_ = false;
 };
 
 }  // namespace gpu

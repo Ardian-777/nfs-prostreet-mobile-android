@@ -171,6 +171,7 @@ class VulkanDevice {
     bool shaderSignedZeroInfNanPreserveFloat32 = false;
     bool shaderDenormFlushToZeroFloat32 = false;
     bool shaderRoundingModeRTEFloat32 = false;
+    bool shaderRoundingModeRTZFloat32 = false;
 
     // VK_EXT_fragment_shader_interlock (#252)
 

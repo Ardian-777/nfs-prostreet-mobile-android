@@ -921,6 +921,18 @@ class Shader {
 
   // Labels that jumps (explicit or from loops) can be done to.
   const std::set<uint32_t>& label_addresses() const { return label_addresses_; }
+  // Whether the result of the vector or the scalar operation of the ALU
+  // instruction at the address may reach a vertex fetch index, the address
+  // register, a memory export or a floor, trunc or frc operand, where rounding
+  // it differently may change the outcome by a whole unit. Vertex shaders only.
+  bool IsAluVectorResultRoundingSensitive(uint32_t address) const {
+    return address < alu_rounding_sensitive_results_.size() &&
+           (alu_rounding_sensitive_results_[address] & 0b01);
+  }
+  bool IsAluScalarResultRoundingSensitive(uint32_t address) const {
+    return address < alu_rounding_sensitive_results_.size() &&
+           (alu_rounding_sensitive_results_[address] & 0b10);
+  }
 
   // Exclusive upper bound of the indexes of paired control flow instructions
   // (each corresponds to 3 dwords).
@@ -1083,6 +1095,9 @@ class Shader {
   std::vector<TextureBinding> texture_bindings_;
   ConstantRegisterMap constant_register_map_ = {0};
   std::set<uint32_t> label_addresses_;
+  // Per instruction address, bit 0 for the vector and bit 1 for the scalar
+  // operation (see IsAluVectorResultRoundingSensitive).
+  std::vector<uint8_t> alu_rounding_sensitive_results_;
   uint32_t cf_pair_index_bound_ = 0;
   uint32_t register_static_address_bound_ = 0;
   uint32_t writes_interpolators_ = 0;
@@ -1132,6 +1147,7 @@ class Shader {
   void GatherFetchResultInformation(const InstructionResult& result);
   void GatherAluResultInformation(const InstructionResult& result,
                                   uint32_t exec_cf_index);
+  void GatherAluRoundingSensitivity();
 };
 
 }  // namespace gpu

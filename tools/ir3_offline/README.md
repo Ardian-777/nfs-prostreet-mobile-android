@@ -49,9 +49,9 @@ O cache de shaders do Forza Horizon usado nas medições está no histórico:
 ```bash
 export CORPUS=$PWD/4D5309C9.xsh MESA_BUILD=$PWD/mesa/build
 tools/ir3_offline/run_variant.sh base
-tools/ir3_offline/run_variant.sh fastround spirv_fast_precision_rounding=true
+tools/ir3_offline/run_variant.sh nozero spirv_ps_relaxed_math=1
 python3 tools/ir3_offline/ir3cmp.py tools/ir3_offline/work/stats/base.csv \
-  tools/ir3_offline/work/stats/fastround.csv FS
+  tools/ir3_offline/work/stats/nozero.csv FS
 ```
 
 - Argumentos `cvar=valor` mudam opções do tradutor (sintaxe TOML do valor).
@@ -72,3 +72,8 @@ python3 tools/ir3_offline/ir3cmp.py tools/ir3_offline/work/stats/base.csv \
 | `spirv_ps_relaxed_math = 1` / `2` / `8` / `11` | −4,8% / −13,3% / 0% / −18,7% |
 | `spirv_texture_sign_branch = true` (estático) | +4,9% (caminho sem gama: −21,2%) |
 | `spirv_vs_math_experiment = 11` (VS, 221 shaders) | −7,8% |
+
+Medidos antes de 30/10/2026, quando o arredondamento de 21 bits depois de
+exp, log, sqrt, rsq e rcp saiu (os pixel shaders passaram a usar as operações
+do host): `spirv_fast_precision_rounding` não existe mais, e o bit 2 de
+`spirv_ps_relaxed_math` não muda mais nada.

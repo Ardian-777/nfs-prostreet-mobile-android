@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "xenia/gpu/gpu_flags.h"
+
 namespace xe {
 namespace gpu {
 
@@ -272,6 +274,44 @@ const std::array<float, 4> ShaderInterpreter::GetFloatConstant(
   return value;
 }
 
+// Saturates overflow from finite operands, or steps a result that rounded away
+// from zero back toward it.
+static float RoundTowardZero(float rounded, bool rounded_away, float a,
+                             float b) {
+  if (std::isinf(rounded) && std::isfinite(a) && std::isfinite(b)) {
+    return std::copysign(FLT_MAX, rounded);
+  }
+  return rounded_away ? std::nextafter(rounded, 0.0f) : rounded;
+}
+
+float ShaderInterpreter::AluAdd(float a, float b) {
+  float sum = a + b;
+  if (!cvars::alu_round_toward_zero) {
+    return sum;
+  }
+  // Two-sum error of the rounded sum, exact unless it overflowed.
+  float b_rounded = sum - a;
+  float error = (a - (sum - b_rounded)) + (b - b_rounded);
+  return RoundTowardZero(
+      sum, sum != 0.0f && error != 0.0f && (error < 0.0f) != (sum < 0.0f), a,
+      b);
+}
+
+float ShaderInterpreter::AluSubtract(float a, float b) {
+  return cvars::alu_round_toward_zero ? AluAdd(a, -b) : a - b;
+}
+
+float ShaderInterpreter::AluMultiply(float a, float b) {
+  float product = a * b;
+  if (!cvars::alu_round_toward_zero) {
+    return product;
+  }
+  // The product of two floats is exact as a double.
+  return RoundTowardZero(
+      product, std::abs(double(product)) > std::abs(double(a) * double(b)), a,
+      b);
+}
+
 void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
   // Vector operation.
   float vector_result[4] = {};
@@ -321,15 +361,17 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
     switch (vector_opcode) {
       case ucode::AluVectorOpcode::kAdd: {
         for (uint32_t i = 0; i < 4; ++i) {
-          vector_result[i] = vector_operands[0][i] + vector_operands[1][i];
+          vector_result[i] =
+              AluAdd(vector_operands[0][i], vector_operands[1][i]);
         }
       } break;
       case ucode::AluVectorOpcode::kMul: {
         for (uint32_t i = 0; i < 4; ++i) {
           // Direct3D 9 behavior (0 or denormal * anything = +0).
-          vector_result[i] = (vector_operands[0][i] && vector_operands[1][i])
-                                 ? vector_operands[0][i] * vector_operands[1][i]
-                                 : 0.0f;
+          vector_result[i] =
+              (vector_operands[0][i] && vector_operands[1][i])
+                  ? AluMultiply(vector_operands[0][i], vector_operands[1][i])
+                  : 0.0f;
         }
       } break;
       case ucode::AluVectorOpcode::kMax: {
@@ -374,8 +416,8 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       } break;
       case ucode::AluVectorOpcode::kFrc: {
         for (uint32_t i = 0; i < 4; ++i) {
-          vector_result[i] =
-              vector_operands[0][i] - std::floor(vector_operands[0][i]);
+          vector_result[i] = AluSubtract(vector_operands[0][i],
+                                         std::floor(vector_operands[0][i]));
         }
       } break;
       case ucode::AluVectorOpcode::kTrunc: {
@@ -393,11 +435,11 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
           // Direct3D 9 behavior (0 or denormal * anything = +0).
           // Doing the addition rather than conditional assignment even for zero
           // operands because +0 + -0 must be +0.
-          vector_result[i] =
-              ((vector_operands[0][i] && vector_operands[1][i])
-                   ? vector_operands[0][i] * vector_operands[1][i]
-                   : 0.0f) +
-              vector_operands[2][i];
+          vector_result[i] = AluAdd(
+              (vector_operands[0][i] && vector_operands[1][i])
+                  ? AluMultiply(vector_operands[0][i], vector_operands[1][i])
+                  : 0.0f,
+              vector_operands[2][i]);
         }
       } break;
       case ucode::AluVectorOpcode::kCndEq: {
@@ -579,9 +621,10 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       case ucode::AluVectorOpcode::kDst: {
         vector_result[0] = 1.0f;
         // Direct3D 9 behavior (0 or denormal * anything = +0).
-        vector_result[1] = (vector_operands[0][1] && vector_operands[1][1])
-                               ? vector_operands[0][1] * vector_operands[1][1]
-                               : 0.0f;
+        vector_result[1] =
+            (vector_operands[0][1] && vector_operands[1][1])
+                ? AluMultiply(vector_operands[0][1], vector_operands[1][1])
+                : 0.0f;
         vector_result[2] = vector_operands[0][2];
         vector_result[3] = vector_operands[1][3];
       } break;
@@ -678,24 +721,27 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
     case ucode::AluScalarOpcode::kAdds:
     case ucode::AluScalarOpcode::kAddsc0:
     case ucode::AluScalarOpcode::kAddsc1: {
-      state_.previous_scalar = scalar_operands[0] + scalar_operands[1];
+      state_.previous_scalar = AluAdd(scalar_operands[0], scalar_operands[1]);
     } break;
     case ucode::AluScalarOpcode::kAddsPrev: {
-      state_.previous_scalar = scalar_operands[0] + state_.previous_scalar;
+      state_.previous_scalar =
+          AluAdd(scalar_operands[0], state_.previous_scalar);
     } break;
     case ucode::AluScalarOpcode::kMuls:
     case ucode::AluScalarOpcode::kMulsc0:
     case ucode::AluScalarOpcode::kMulsc1: {
       // Direct3D 9 behavior (0 or denormal * anything = +0).
-      state_.previous_scalar = (scalar_operands[0] && scalar_operands[1])
-                                   ? scalar_operands[0] * scalar_operands[1]
-                                   : 0.0f;
+      state_.previous_scalar =
+          (scalar_operands[0] && scalar_operands[1])
+              ? AluMultiply(scalar_operands[0], scalar_operands[1])
+              : 0.0f;
     } break;
     case ucode::AluScalarOpcode::kMulsPrev: {
       // Direct3D 9 behavior (0 or denormal * anything = +0).
-      state_.previous_scalar = (scalar_operands[0] && state_.previous_scalar)
-                                   ? scalar_operands[0] * state_.previous_scalar
-                                   : 0.0f;
+      state_.previous_scalar =
+          (scalar_operands[0] && state_.previous_scalar)
+              ? AluMultiply(scalar_operands[0], state_.previous_scalar)
+              : 0.0f;
     } break;
     case ucode::AluScalarOpcode::kMulsPrev2: {
       if (state_.previous_scalar == -FLT_MAX ||
@@ -707,7 +753,7 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
         // Direct3D 9 behavior (0 or denormal * anything = +0).
         state_.previous_scalar =
             (scalar_operands[0] && state_.previous_scalar)
-                ? scalar_operands[0] * state_.previous_scalar
+                ? AluMultiply(scalar_operands[0], state_.previous_scalar)
                 : 0.0f;
       }
     } break;
@@ -738,7 +784,7 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
     } break;
     case ucode::AluScalarOpcode::kFrcs: {
       state_.previous_scalar =
-          scalar_operands[0] - std::floor(scalar_operands[0]);
+          AluSubtract(scalar_operands[0], std::floor(scalar_operands[0]));
     } break;
     case ucode::AluScalarOpcode::kTruncs: {
       state_.previous_scalar = std::trunc(scalar_operands[0]);
@@ -747,19 +793,19 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       state_.previous_scalar = std::floor(scalar_operands[0]);
     } break;
     case ucode::AluScalarOpcode::kExp: {
-      state_.previous_scalar = std::exp2(scalar_operands[0]);
+      state_.previous_scalar = xenos::Exp(scalar_operands[0]);
     } break;
     case ucode::AluScalarOpcode::kLogc: {
-      state_.previous_scalar = std::log2(scalar_operands[0]);
+      state_.previous_scalar = xenos::Log(scalar_operands[0]);
       if (state_.previous_scalar == -INFINITY) {
         state_.previous_scalar = -FLT_MAX;
       }
     } break;
     case ucode::AluScalarOpcode::kLog: {
-      state_.previous_scalar = std::log2(scalar_operands[0]);
+      state_.previous_scalar = xenos::Log(scalar_operands[0]);
     } break;
     case ucode::AluScalarOpcode::kRcpc: {
-      state_.previous_scalar = 1.0f / scalar_operands[0];
+      state_.previous_scalar = xenos::Rcp(scalar_operands[0]);
       if (state_.previous_scalar == -INFINITY) {
         state_.previous_scalar = -FLT_MAX;
       } else if (state_.previous_scalar == INFINITY) {
@@ -767,7 +813,7 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       }
     } break;
     case ucode::AluScalarOpcode::kRcpf: {
-      state_.previous_scalar = 1.0f / scalar_operands[0];
+      state_.previous_scalar = xenos::Rcp(scalar_operands[0]);
       if (state_.previous_scalar == -INFINITY) {
         state_.previous_scalar = -0.0f;
       } else if (state_.previous_scalar == INFINITY) {
@@ -775,10 +821,10 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       }
     } break;
     case ucode::AluScalarOpcode::kRcp: {
-      state_.previous_scalar = 1.0f / scalar_operands[0];
+      state_.previous_scalar = xenos::Rcp(scalar_operands[0]);
     } break;
     case ucode::AluScalarOpcode::kRsqc: {
-      state_.previous_scalar = 1.0f / std::sqrt(scalar_operands[0]);
+      state_.previous_scalar = xenos::Rsq(scalar_operands[0]);
       if (state_.previous_scalar == -INFINITY) {
         state_.previous_scalar = -FLT_MAX;
       } else if (state_.previous_scalar == INFINITY) {
@@ -786,7 +832,7 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       }
     } break;
     case ucode::AluScalarOpcode::kRsqf: {
-      state_.previous_scalar = 1.0f / std::sqrt(scalar_operands[0]);
+      state_.previous_scalar = xenos::Rsq(scalar_operands[0]);
       if (state_.previous_scalar == -INFINITY) {
         state_.previous_scalar = -0.0f;
       } else if (state_.previous_scalar == INFINITY) {
@@ -794,7 +840,7 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       }
     } break;
     case ucode::AluScalarOpcode::kRsq: {
-      state_.previous_scalar = 1.0f / std::sqrt(scalar_operands[0]);
+      state_.previous_scalar = xenos::Rsq(scalar_operands[0]);
     } break;
     case ucode::AluScalarOpcode::kMaxAs: {
       state_.address_register = int32_t(std::floor(
@@ -815,10 +861,12 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
     case ucode::AluScalarOpcode::kSubs:
     case ucode::AluScalarOpcode::kSubsc0:
     case ucode::AluScalarOpcode::kSubsc1: {
-      state_.previous_scalar = scalar_operands[0] - scalar_operands[1];
+      state_.previous_scalar =
+          AluSubtract(scalar_operands[0], scalar_operands[1]);
     } break;
     case ucode::AluScalarOpcode::kSubsPrev: {
-      state_.previous_scalar = scalar_operands[0] - state_.previous_scalar;
+      state_.previous_scalar =
+          AluSubtract(scalar_operands[0], state_.previous_scalar);
     } break;
     case ucode::AluScalarOpcode::kSetpEq: {
       state_.predicate = scalar_operands[0] == 0.0f;
@@ -844,7 +892,7 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
               : (scalar_operands[0] == 0.0f ? 1.0f : scalar_operands[0]);
     } break;
     case ucode::AluScalarOpcode::kSetpPop: {
-      float new_counter = scalar_operands[0] - 1.0f;
+      float new_counter = AluSubtract(scalar_operands[0], 1.0f);
       state_.predicate = std::islessequal(new_counter, 0.0f);
       state_.previous_scalar = state_.predicate ? 0.0f : new_counter;
     } break;
@@ -875,7 +923,7 @@ void ShaderInterpreter::ExecuteAluInstruction(ucode::AluInstruction instr) {
       state_.previous_scalar = float(scalar_operands[0] == 1.0f);
     } break;
     case ucode::AluScalarOpcode::kSqrt: {
-      state_.previous_scalar = std::sqrt(scalar_operands[0]);
+      state_.previous_scalar = xenos::Sqrt(scalar_operands[0]);
     } break;
     case ucode::AluScalarOpcode::kSin: {
       state_.previous_scalar = std::sin(scalar_operands[0]);

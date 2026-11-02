@@ -71,10 +71,11 @@ DEFINE_int32(
     "Diagnostics - measures how much GPU time the emulation of Xenos math and "
     "texture semantics costs in pixel shaders. Bit mask, pixel shaders only, "
     "read when shaders are translated (startup): 1 - no Shader Model 3 "
-    "'0 * anything = 0' multiplication emulation; 2 - no 21-bit precision "
-    "rounding after exp/log/sqrt/rsq/rcp; 4 - texture fetches ignore the "
-    "signed/biased/gamma component signs (WRONG COLORS, measurement only); 8 - "
-    "allow floating-point contraction (fused multiply-add).",
+    "'0 * anything = 0' multiplication emulation; 2 - no effect since "
+    "2026-10-30 (pixel shaders take the host's exp/log/sqrt/rsq/rcp); 4 - "
+    "texture fetches ignore the signed/biased/gamma component signs (WRONG "
+    "COLORS, measurement only); 8 - allow floating-point contraction (fused "
+    "multiply-add).",
     "GPU");
 
 DEFINE_int32(
@@ -83,14 +84,15 @@ DEFINE_int32(
     "time. Bit mask, read when shaders are translated (startup): 1 - no "
     "Shader Model 3 '0 * anything = 0' in multiplications (titles relying on "
     "0 * infinity or 0 * NaN giving 0 may show black or white pixels, and "
-    "zero products keep their IEEE sign); 2 - no rounding to the 21 mantissa "
-    "bits of the Xenos after exp, log, sqrt, rsq and rcp; 8 - allow fused "
-    "multiply-add (results may differ in the last bits between shaders, so "
-    "multipass effects repeating a calculation may not match exactly; no "
-    "change in the code Turnip generates). 11 (all) measured -6% GPU time in "
-    "the Forza Horizon main pass on Adreno 825 with no visible difference. "
-    "The same bits as spirv_ps_math_experiment, without its texture sign bit "
-    "(4).",
+    "zero products keep their IEEE sign); 2 - no effect since 2026-10-30, "
+    "when pixel shaders started taking the host's exp, log, sqrt, rsq and "
+    "rcp (it skipped rounding them to the 21 mantissa bits of the Xenos); 8 - "
+    "allow fused multiply-add (results may differ in the last bits between "
+    "shaders, so multipass effects repeating a calculation may not match "
+    "exactly; no change in the code Turnip generates). 11 (all) measured -6% "
+    "GPU time in the Forza Horizon main pass on Adreno 825 with no visible "
+    "difference. The same bits as spirv_ps_math_experiment, without its "
+    "texture sign bit (4).",
     "GPU");
 
 DEFINE_int32(
@@ -109,28 +111,13 @@ DEFINE_int32(
     "translated (startup): 1 - no Shader Model 3 '0 * anything = 0' in "
     "multiplications (the same results for finite operands, only the sign of "
     "a zero product may differ - positions computed by different shaders "
-    "still match); 2 - no rounding to the 21 mantissa bits of the Xenos after "
-    "exp, log, sqrt, rsq and rcp; 8 - allow fused multiply-add. 2 and 8 change "
-    "results, so the same position computed by different shaders may stop "
-    "matching between passes (depth fighting).",
+    "still match); 2 - the host's exp, log, sqrt, rsq and rcp and its "
+    "rounding of sums and products to nearest, instead of the Xenos' (its "
+    "exact ops, and alu_round_toward_zero); 8 - allow fused multiply-add "
+    "(which also turns alu_round_toward_zero off). 2 and 8 change results, so "
+    "the same position computed by different shaders may stop matching "
+    "between passes (depth fighting).",
     "GPU");
-
-DEFINE_bool(
-    spirv_fast_precision_rounding, false,
-    "Round results of exp, log, sqrt, rsq and rcp to the 21 mantissa bits of "
-    "the Xenos with an add of half the kept unit in the last place and a "
-    "mask, instead of computing both roundings and selecting (5 instead of 12 "
-    "Adreno instructions each, -6% pixel shader instructions on the Forza "
-    "Horizon shaders). The same arithmetic for every input, including "
-    "infinity, NaN and the finite values that must not round up to infinity; "
-    "read when shaders are translated (startup). Off except for the Forza "
-    "titles it was measured with (game_quirks): on for every title from "
-    "2026-10-05, it turned Prototype's lit scene black on Turnip (Adreno 825 "
-    "and 830) - the ground, buildings and people, while the same shaders with "
-    "the select draw it (frame dump and runtime A/B, POCO F7, 2026-10-28).",
-    "GPU");
-UPDATE_from_bool(spirv_fast_precision_rounding, 2026, 10, 5, 12, false);
-UPDATE_from_bool(spirv_fast_precision_rounding, 2026, 10, 28, 22, true);
 
 DEFINE_bool(
     spirv_texture_sign_branch, true,
@@ -145,7 +132,7 @@ DEFINE_bool(
     "per fetch, so this pays off unless most fetched textures are gamma (see "
     "the TexSigns lines of pm4_bin_trace). Same results; read when shaders "
     "are translated (startup). On for every title since 2026-10-05 (exact; "
-    "Forza Horizon +3% fps with spirv_fast_precision_rounding).",
+    "Forza Horizon +3% fps with the fast 21-bit rounding of the time).",
     "GPU");
 UPDATE_from_bool(spirv_texture_sign_branch, 2026, 10, 5, 11, false);
 
@@ -335,6 +322,8 @@ SpirvShaderTranslator::Features::Features(
           vulkan_device->properties().shaderDenormFlushToZeroFloat32),
       rounding_mode_rte_float32(
           vulkan_device->properties().shaderRoundingModeRTEFloat32),
+      rounding_mode_rtz_float32(
+          vulkan_device->properties().shaderRoundingModeRTZFloat32),
       fragment_shader_sample_interlock(
           vulkan_device->properties().fragmentShaderSampleInterlock),
       demote_to_helper_invocation(
@@ -457,6 +446,7 @@ void SpirvShaderTranslator::Reset() {
   texture_exp_adjust_zero_spec_constant_ = spv::NoResult;
 
   main_interface_.clear();
+  var_main_estimate_coefficients_.fill(spv::NoResult);
   var_main_registers_ = spv::NoResult;
   var_main_memexport_address_ = spv::NoResult;
   for (size_t memexport_eM_index = 0;
@@ -530,7 +520,7 @@ void SpirvShaderTranslator::StartTranslation() {
   if (features_.spirv_version < spv::Spv_1_4) {
     if (features_.signed_zero_inf_nan_preserve_float32 ||
         features_.denorm_flush_to_zero_float32 ||
-        features_.rounding_mode_rte_float32) {
+        features_.rounding_mode_rte_float32 || RoundsTowardZeroInHardware()) {
       builder_->addExtension("SPV_KHR_float_controls");
     }
   }
@@ -1336,8 +1326,12 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
     builder_->addExecutionMode(function_main_,
                                spv::ExecutionModeSignedZeroInfNanPreserve, 32);
   }
-  if (features_.rounding_mode_rte_float32 &&
-      !cvars::spirv_disable_rounding_mode_rte) {
+  if (RoundsTowardZeroInHardware()) {
+    builder_->addCapability(spv::CapabilityRoundingModeRTZ);
+    builder_->addExecutionMode(function_main_,
+                               spv::ExecutionModeRoundingModeRTZ, 32);
+  } else if (features_.rounding_mode_rte_float32 &&
+             !cvars::spirv_disable_rounding_mode_rte) {
     builder_->addCapability(spv::CapabilityRoundingModeRTE);
     builder_->addExecutionMode(function_main_,
                                spv::ExecutionModeRoundingModeRTE, 32);

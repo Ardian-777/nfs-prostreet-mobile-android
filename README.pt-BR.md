@@ -47,9 +47,9 @@ aparelhos reais.
 - **Menos transferências de EDRAM** na GPU: transferências que um draw sobrescreve são
   puladas e, nos jogos que permitem, a profundidade desenhada em 4× MSAA vai direto para
   a superfície 1× e as faixas do tiling predicado são desenhadas uma vez só.
-- **Atalhos exatos nos shaders** (decodificação do sinal das texturas, arredondamento de
-  21 bits), cargas de textura direto nas imagens, resolves diretos no host e o
-  compilador de shaders do Turnip configurado para muitos draws pequenos.
+- **Atalhos exatos nos shaders** (decodificação do sinal das texturas), cargas de
+  textura direto nas imagens, resolves diretos no host e o compilador de shaders do
+  Turnip configurado para muitos draws pequenos.
 - **Thread de comandos mais leve**: resolves copiados de volta para a memória do jogo
   só quando o jogo os lê, comandos enviados em lotes pequenos quando a GPU fica sem
   trabalho e, no Turnip, constant buffers com offsets dinâmicos e descriptor sets de

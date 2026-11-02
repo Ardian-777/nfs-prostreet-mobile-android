@@ -72,12 +72,11 @@ static const Quirk kQuirks[] = {
      "unmet memory waits re-checked early"},
     {0x45410961, "wait_reg_mem_backoff_max_us", int64_t(200),
      "unmet memory waits re-checked within 200 us"},
-    // Forza Horizon: both exact (the same image for every input); on the POCO
-    // F7 (Adreno 825) together +3.0% fps, -3.7% GPU time (AB5, 2026-09-29).
+    // Forza Horizon: exact (the same image for every input); on the POCO F7
+    // (Adreno 825), with the cheaper 21-bit rounding that went with the Xenos
+    // scalar ops, +3.0% fps, -3.7% GPU time (AB5, 2026-09-29).
     {0x4D5309C9, "spirv_texture_sign_branch", true,
      "exact texture sign decode in a uniform branch"},
-    {0x4D5309C9, "spirv_fast_precision_rounding", true,
-     "exact cheaper 21-bit rounding"},
     // Exact too: ~10 full-screen textures reloaded per frame skip the copy from
     // a buffer; +4.5% fps, -5.4% GPU time on the POCO F7 (2026-09-29).
     {0x4D5309C9, "vulkan_texture_load_to_image", true,
@@ -87,10 +86,12 @@ static const Quirk kQuirks[] = {
     // fps with the POCO F7 cool; 2026-09-30).
     {0x4D5309C9, "vulkan_direct_host_resolve_to_texture", true,
      "resolves store straight into their textures"},
-    // Main pass -7% (AB5). No visible difference parked, over a 45 s drive
-    // and in the pause menu (2026-09-30); night, rain and tunnels unchecked.
-    {0x4D5309C9, "spirv_ps_relaxed_math", int64_t(3),
-     "no SM3 zero-multiply or 21-bit rounding emulation in pixel shaders"},
+    // Main pass -7% (AB5), measured with 3: also without the 21-bit rounding,
+    // gone for every title since 2026-10-30. No visible difference parked,
+    // over a 45 s drive and in the pause menu (2026-09-30); night, rain and
+    // tunnels unchecked.
+    {0x4D5309C9, "spirv_ps_relaxed_math", int64_t(1),
+     "no SM3 zero-multiply emulation in pixel shaders"},
     // 55% of the main pass draws use alpha to coverage: main pass -7.5%, the
     // same foliage parked and driving (only the dither pattern differs).
     {0x4D5309C9, "host_alpha_to_coverage", true,
@@ -202,8 +203,6 @@ static const Quirk kQuirks[] = {
      "texture signs known to the host compiler per pipeline"},
     {0x4D530AA4, "spirv_texture_sign_branch", true,
      "exact texture sign decode in a uniform branch"},
-    {0x4D530AA4, "spirv_fast_precision_rounding", true,
-     "exact cheaper 21-bit rounding"},
     {0x4D530AA4, "skip_overwritten_transfers", true,
      "no transfers into what the draw overwrites"},
     {0x4D530AA4, "skip_overwritten_transfers_cutout", true,
@@ -216,8 +215,8 @@ static const Quirk kQuirks[] = {
      "resolve clears inside the game's render pass"},
     {0x4D530AA4, "spirv_texture_implicit_lod", true,
      "2D texture fetches with the host's LOD"},
-    {0x4D530AA4, "spirv_ps_relaxed_math", int64_t(3),
-     "no SM3 zero-multiply or 21-bit rounding emulation in pixel shaders"},
+    {0x4D530AA4, "spirv_ps_relaxed_math", int64_t(1),
+     "no SM3 zero-multiply emulation in pixel shaders"},
     {0x4D530AA4, "spirv_vs_relaxed_math", int64_t(1),
      "no SM3 zero-multiply emulation in vertex shaders"},
     {0x4D530AA4, "host_alpha_to_coverage", true,
@@ -313,14 +312,15 @@ static const Quirk kQuirks[] = {
     {0x4541098E, "spirv_texture_implicit_lod", true,
      "2D texture fetches with the host's LOD"},
     // Without the Shader Model 3 "0 * x = 0" emulation and the 21-bit
-    // rounding in pixel shaders, and the former in vertex shaders, as for
-    // Forza Horizon: main pass 11.4 -> 9.9 ms, the 640x4096 passes 1.57 ->
+    // rounding (gone for every title since 2026-10-30) in pixel shaders, and
+    // the former in vertex shaders, as for Forza Horizon (measured with 3):
+    // main pass 11.4 -> 9.9 ms, the 640x4096 passes 1.57 ->
     // 1.32 ms, GPU time 24.8 -> 23.5 ms a frame with the phone hotter. The
     // same image standing on the deck at night in the rain with the lighting
     // right - no black or white pixels; the colored specks flickering on the
     // pistol's emblem are there with either (restart A/B pair, 2026-10-07).
-    {0x4541098E, "spirv_ps_relaxed_math", int64_t(3),
-     "no SM3 zero-multiply or 21-bit rounding emulation in pixel shaders"},
+    {0x4541098E, "spirv_ps_relaxed_math", int64_t(1),
+     "no SM3 zero-multiply emulation in pixel shaders"},
     {0x4541098E, "spirv_vs_relaxed_math", int64_t(1),
      "no SM3 zero-multiply emulation in vertex shaders"},
     // It copies memory with the GPU while loading - one vertex shader
