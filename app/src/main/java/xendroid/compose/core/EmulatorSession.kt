@@ -122,13 +122,18 @@ class EmulatorSession {
         runCatching { EmulatorRuntime.emulator?.flush_gpu_caches() }
     }
 
-    /** Single input sink for ALL controls. value = KEY_VALUE_UNUSED (-1) for digital, or a
-     *  signed short magnitude for thumbsticks. Dropped until boot() has run: native key_event
+    /** Single input sink for ALL controls. value = KEY_VALUE_UNUSED (-1) for digital, the 0-255
+     *  travel of an analog trigger (LT, RT), or a signed short magnitude for thumbsticks.
+     *  Dropped until boot() has run: native key_event
      *  unconditionally derefs g_windowed_app_ref, null until the detached boot thread sets it
      *  (a controller press during the boot splash would crash). */
     fun keyEvent(keyCode: Int, pressed: Boolean, value: Int) {
         if (!booted) return
-        if (keyCode in p1Held.indices) p1Held[keyCode] = pressed
+        // #97: an analog trigger counts as held past XInput's threshold, as the core's
+        // keystrokes take it, not from its first 2 % (gyro aim while LT is held).
+        if (keyCode in p1Held.indices) p1Held[keyCode] =
+            if ((keyCode == xendroid.compose.gamepad.AnalogTriggers.KC_TRIGGER_L ||
+                    keyCode == xendroid.compose.gamepad.AnalogTriggers.KC_TRIGGER_R) && value >= 0) value > 0x1F else pressed
         core.key_event(keyCode, pressed, value)
     }
 

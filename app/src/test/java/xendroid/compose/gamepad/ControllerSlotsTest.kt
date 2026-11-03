@@ -62,7 +62,7 @@ class SlotInputRouterTest {
         // Pushed up (Android -Y): P1's rule sends the "down" key with a positive value; the
         // value carries the sign, and XInput's Y up is positive.
         assertTrue(sent.contains("P2:19:down:16383"))
-        assertTrue(sent.contains("P2:14:down:-1"))                           // left trigger past half
+        assertTrue(sent.contains("P2:14:down:230"))                          // left trigger, 0.9 of its travel (#97)
         assertTrue(sent.contains("P2:2:down:-1"))                            // hat right = D-pad right
         sent.clear()
         router.motion(1, lx = -1f, ly = -0.5f, rx = 0f, ry = 0f, lt = 0.9f, rt = 0f, hatX = 1f, hatY = 0f)
@@ -71,13 +71,29 @@ class SlotInputRouterTest {
         assertTrue(sent.contains("P2:16:up:0"))                              // a broken sample reads as centred
     }
 
+    @Test fun triggersFollowTheMappingOfL2AndR2() {
+        // L2 on the guest's A (4): past half way it presses A, and LT stays alone.
+        router.motion(1, lx = 0f, ly = 0f, rx = 0f, ry = 0f, lt = 0.6f, rt = 0.3f, hatX = 0f, hatY = 0f, ltKey = 4, rtKey = 15)
+        fun triggerKeys() = sent.filter { it.startsWith("P2:4:") || it.startsWith("P2:15:") }.toSet()
+        assertEquals(setOf("P2:4:down:-1", "P2:15:down:77"), triggerKeys())
+        sent.clear()
+        router.motion(1, lx = 0f, ly = 0f, rx = 0f, ry = 0f, lt = 0.4f, rt = 0f, hatX = 0f, hatY = 0f, ltKey = 4, rtKey = 15)
+        assertEquals(setOf("P2:4:up:-1", "P2:15:up:0"), triggerKeys())
+    }
+
+    @Test fun aTriggerAtRestLeavesATriggerKeyHeldAlone() {
+        router.keyDown(1, identity = 7, key = 14)                            // a Switch Pro's digital ZL
+        router.motion(1, lx = 0.6f, ly = 0f, rx = 0f, ry = 0f, lt = 0f, rt = 0f, hatX = 0f, hatY = 0f)
+        assertTrue(sent.none { it.startsWith("P2:14:up") })
+    }
+
     @Test fun releasingAPlayerReleasesOnlyWhatItsControllerHeld() {
         router.keyDown(1, 7, 4)
         router.motion(1, lx = 1f, ly = 0f, rx = 0f, ry = 0f, lt = 0f, rt = 1f, hatX = 0f, hatY = -1f)
         router.keyDown(2, 9, 5)
         sent.clear()
         router.release(1)
-        assertEquals(setOf("P2:4:up:-1", "P2:18:up:0", "P2:15:up:-1", "P2:1:up:-1"), sent.toSet())
+        assertEquals(setOf("P2:4:up:-1", "P2:18:up:0", "P2:15:up:0", "P2:1:up:-1"), sent.toSet())
         sent.clear()
         router.release(1)                                                    // already released
         assertEquals(emptyList<String>(), sent)

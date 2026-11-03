@@ -36,6 +36,9 @@ namespace xe {
                     ui::VirtualKey id;
                     bool pressed;
                     int value;
+                    // Pressed as keystrokes see it: an analog trigger past XInput's
+                    // threshold (#97), the key's own state otherwise.
+                    bool stroke;
                 };
 
                 struct Slot {

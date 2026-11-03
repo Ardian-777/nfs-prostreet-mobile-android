@@ -47,7 +47,7 @@ namespace xe {
 
             void ResetKeys(AndroidInputDriver::Slot& slot) {
                 for (size_t i = 0; i < kKeyOrder.size(); ++i) {
-                    slot.keys[i] = {kKeyOrder[i], false, 0};
+                    slot.keys[i] = {kKeyOrder[i], false, 0, false};
                 }
                 slot.prev_keys = slot.keys;
                 slot.mask = 0;
@@ -163,11 +163,16 @@ namespace xe {
                             case ui::VirtualKey::kXInputPadRShoulder:
                                 buttons |= 0x0200;  // XINPUT_GAMEPAD_RIGHT_SHOULDER
                                 break;
+                            // An analog trigger sends its travel, 0-255; a digital
+                            // press (value < 0: the touch controls, an L2/R2 key)
+                            // is full.
                             case ui::VirtualKey::kXInputPadLTrigger:
-                                left_trigger = 0xFF;
+                                left_trigger = ks.value < 0 ? 0xFF
+                                               : uint8_t(ks.value > 0xFF ? 0xFF : ks.value);
                                 break;
                             case ui::VirtualKey::kXInputPadRTrigger:
-                                right_trigger = 0xFF;
+                                right_trigger = ks.value < 0 ? 0xFF
+                                                : uint8_t(ks.value > 0xFF ? 0xFF : ks.value);
                                 break;
                             case ui::VirtualKey::kXInputPadLThumbLeft:
                             case ui::VirtualKey::kXInputPadLThumbRight:
@@ -245,9 +250,9 @@ namespace xe {
                         if (slot.mask & (1u << i)) {
                             xinput_virtual_key = slot.keys[i].id;
                             slot.mask &= ~(1u << i);
-                            keystroke_flags |= slot.keys[i].pressed ? 0x0001   // XINPUT_KEYSTROKE_KEYDOWN
+                            keystroke_flags |= slot.keys[i].stroke ? 0x0001   // XINPUT_KEYSTROKE_KEYDOWN
                                                                     : 0x0002;  // XINPUT_KEYSTROKE_KEYUP
-                            if (slot.prev_keys[i].pressed == slot.keys[i].pressed) {
+                            if (slot.prev_keys[i].stroke == slot.keys[i].stroke) {
                                 keystroke_flags |= 0x0004;  // XINPUT_KEYSTROKE_REPEAT
                             }
                             result = X_ERROR_SUCCESS;
@@ -277,17 +282,23 @@ namespace xe {
                 if (!slot.connected) {
                     return;
                 }
-                const bool was_pressed = slot.keys[key_index].pressed;
-                slot.prev_keys[key_index] = slot.keys[key_index];
-
-                slot.keys[key_index].pressed = pressed;
-                slot.keys[key_index].value = value;
+                KeyStatus& key = slot.keys[key_index];
+                // #97: keystrokes see an analog trigger pressed past XInput's threshold
+                // (> 0x1F, as Edge's SDL driver), not at its first bit of travel.
+                const bool trigger = key.id == ui::VirtualKey::kXInputPadLTrigger ||
+                                     key.id == ui::VirtualKey::kXInputPadRTrigger;
+                const bool stroke = trigger && value >= 0 ? value > 0x1F : pressed;
 
                 // Transitions only: analog axes re-send every motion sample, which
-                // would keep GetKeystroke from ever reaching EMPTY.
-                if (was_pressed != pressed) {
+                // would keep GetKeystroke from ever reaching EMPTY, and would leave
+                // the previous state equal to the new one (a KEYDOWN read as a repeat).
+                if (stroke != key.stroke) {
+                    slot.prev_keys[key_index] = key;
                     slot.mask |= (1u << key_index);
                 }
+                key.pressed = pressed;
+                key.value = value;
+                key.stroke = stroke;
             }
 
             void AndroidInputDriver::SetSlotConnected(size_t slot_index, bool connected, const std::string& name) {
