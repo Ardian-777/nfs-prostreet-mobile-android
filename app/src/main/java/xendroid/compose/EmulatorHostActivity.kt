@@ -1159,8 +1159,13 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
-        runCatching { startActivity(relaunch) }.onFailure { Log.w(TAG, "Starting the game again failed", it) }
-        leave()
+        // Only this activity goes (its process with it): leave() removes the task, or sends it
+        // back, for a game started from outside the app, and the main activity just started in
+        // it to relaunch the game went with it. Without that start, leave() as before, so no
+        // empty task stays behind.
+        runCatching { startActivity(relaunch) }
+            .onSuccess { finish() }
+            .onFailure { Log.w(TAG, "Starting the game again failed", it); leave() }
     }
 
     private fun enterImmersiveMode() {
