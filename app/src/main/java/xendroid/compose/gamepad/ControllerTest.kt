@@ -108,13 +108,17 @@ class ControllerTestModel(private val deadzone: Float = 0.08f, private val maxLo
         const val DPAD_RIGHT = "D-pad →"
 
         /**
-         * The player each connected controller would be in a game started now: the game takes the
-         * controllers present in device order, each on the lowest free player (P1–P[slots]); null
-         * past the last. Phones join later and only as P2–P4.
+         * The player each connected controller would be in a game started now: the game gives
+         * the next player (P1–P[slots]) to each controller as it first plays (#76, [PadPlay]), so
+         * here the ones in [used] (descriptors, as [ControllerUse] has them) take players in that
+         * order; null for one that hasn't played yet, or past the last. Phones join later and
+         * only as P2–P4.
          */
-        fun playerSlots(devices: List<TestedDevice>, slots: Int = 4): Map<Int, Int?> =
-            devices.filter { it.connected }.sortedBy { it.id }.withIndex()
-                .associate { (index, device) -> device.id to index.takeIf { it < slots } }
+        fun playerSlots(devices: List<TestedDevice>, used: List<String>, slots: Int = 4): Map<Int, Int?> {
+            val connected = devices.filter { it.connected }
+            val playing = used.mapNotNull { descriptor -> connected.firstOrNull { it.descriptor == descriptor } }
+            return connected.associate { device -> device.id to playing.indexOf(device).takeIf { it in 0 until slots } }
+        }
 
         /** The buttons an Xbox 360 game uses, for the checklist. */
         val CHECKLIST = listOf("A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3", "Start", "Back",

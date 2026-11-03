@@ -4,8 +4,9 @@ import kotlin.math.abs
 
 /**
  * I01: which physical controller plays as which player. The first controller shares P1
- * with the on-screen pad; the next ones take P2..P4 in arrival order. A controller that
- * comes back (same device descriptor) gets its previous slot again when it is still free.
+ * with the on-screen pad; the next ones take P2..P4 in the order they first play (#76). A
+ * controller that comes back (same device descriptor) gets its previous slot again when it
+ * is still free.
  * Thread-safe: controllers come from the main thread, companion phones from their sockets.
  */
 class ControllerSlots(private val slotCount: Int = 4) {

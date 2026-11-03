@@ -23,7 +23,7 @@
     <string name="xd_ctl_tool_test">Testar controles</string>
     <string name="xd_ctl_tool_phone">Celular como controle</string>
     <string name="xd_ctl_who">Quem joga agora</string>
-    <string name="xd_ctl_who_order">na ordem em que conectaram</string>
+    <string name="xd_ctl_who_order">na ordem do primeiro botão apertado</string>
     <string name="xd_ctl_slot_touch">Controles de toque</string>
     <string name="xd_ctl_slot_touch_sub">nesta tela</string>
     <string name="xd_ctl_slot_free">Livre</string>

@@ -232,6 +232,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
     /** Device id -> descriptor of each known controller (a removed device can no longer be asked). */
     private val controllerKeys = mutableMapOf<Int, String>()
+    /** #76: controllers that played with every player taken; they play as P1, as before. */
+    private val withoutSlot = HashSet<String>()
     /** I04/U08: guest rumble on physical controllers only (never the phone): each controller's own
      *  intensity (set in Test controllers), else the default the in-game menu changes. */
     private val rumbleSettings by lazy {
@@ -319,6 +321,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             if (deviceId == touchHiddenBy) touchControlsBack("the controller disconnected")
             // Release only what the lost controller held (I04); its player slot frees up.
             controllerKeys.remove(deviceId)?.let { key ->
+                withoutSlot.remove(key)
                 controllerSlots.disconnect(key)?.let { slot ->
                     if (slot == 0) releaseGuestInput() else {
                         slotInput.release(slot)
@@ -970,9 +973,39 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         controllers[deviceId] = id
         val key = device.descriptor ?: "device:$deviceId"
         controllerKeys[deviceId] = key
+        // #76: its player comes with its first input ([claimPlayer]).
+        recordEvent("controller", "$what ($id)")
+    }
+
+    /** #76: a controller takes a player when it first plays ([xendroid.compose.gamepad.PadPlay]),
+     *  the one it held before when still free, else the lowest free one. A device that never sends
+     *  input (a handheld's raw controls behind its own mapping service, listed next to the device
+     *  that sends them) takes none, so the controls that play are P1. Every player taken: it plays
+     *  as P1, as before. */
+    private fun claimPlayer(deviceId: Int) {
+        val key = controllerKeys[deviceId] ?: return
+        if (controllerSlots.slotOf(key) != null || key in withoutSlot) return
         val slot = controllerSlots.connect(key)
-        recordEvent("controller", "$what ($id) " + (slot?.let { "as P${it + 1}" } ?: "with no free player slot"))
+        if (slot == null) withoutSlot += key
+        recordEvent("controller", "${controllers[deviceId] ?: "a controller"} " +
+            (slot?.let { "plays as P${it + 1}" } ?: "plays with no free player slot"))
         if (slot != null && slot > 0) session.setSlotConnected(slot, true, "Controller ${slot + 1}")
+    }
+
+    /** A controller that hasn't played yet: nothing it sends is the game's (its sticks at rest
+     *  would release P1's). */
+    private fun isIdleController(deviceId: Int): Boolean {
+        val key = controllerKeys[deviceId] ?: return false
+        return controllerSlots.slotOf(key) == null && key !in withoutSlot
+    }
+
+    private fun playsMotion(event: MotionEvent): Boolean {
+        fun axis(a: Int) = event.getAxisValue(a)
+        return xendroid.compose.gamepad.PadPlay.plays(
+            axis(MotionEvent.AXIS_X), axis(MotionEvent.AXIS_Y), axis(MotionEvent.AXIS_Z), axis(MotionEvent.AXIS_RZ),
+            maxOf(axis(MotionEvent.AXIS_LTRIGGER), axis(MotionEvent.AXIS_BRAKE)),
+            maxOf(axis(MotionEvent.AXIS_RTRIGGER), axis(MotionEvent.AXIS_GAS)),
+            axis(MotionEvent.AXIS_HAT_X), axis(MotionEvent.AXIS_HAT_Y))
     }
 
     /** A press, or a push past half, from a physical controller: playing P1, it puts the
@@ -2331,7 +2364,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 && isControllerEvent(event) &&
-            event.keyCode != KeyEvent.KEYCODE_BACK) noteControllerUse(event)
+            event.keyCode != KeyEvent.KEYCODE_BACK) {
+            claimPlayer(event.deviceId)
+            noteControllerUse(event)
+        }
         // U10: a controller types on the grid; the focused text field must not eat its D-pad.
         if (keyboardRequestState.value != null && !editorOpen.value && isControllerEvent(event)) {
             return when (event.action) {
@@ -2525,6 +2561,9 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK && playsMotion(event)) {
+            claimPlayer(event.deviceId)
+        }
         if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK &&
             xendroid.compose.gamepad.TouchOverlayPresence.pushed(
                 event.getAxisValue(MotionEvent.AXIS_X), event.getAxisValue(MotionEvent.AXIS_Y),
@@ -2560,6 +2599,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             return true
         }
 
+        // #76: a controller that hasn't played sends nothing to the game yet.
+        if (isIdleController(event.deviceId)) return true
         val player = playerSlot(event.deviceId)
         if (player > 0 && event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK) {
             // Same axes and rules as P1 below; a D-pad that also sends keys has no hat here.

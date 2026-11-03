@@ -53,6 +53,7 @@ import xendroid.compose.R
 import xendroid.compose.gamepad.ControlOptions
 import xendroid.compose.gamepad.ControlOptionsStore
 import xendroid.compose.gamepad.ControllerTestModel
+import xendroid.compose.gamepad.ControllerUse
 import xendroid.compose.gamepad.GamepadConfigDto
 import xendroid.compose.gamepad.GamepadController
 import xendroid.compose.gamepad.GamepadGlobalsDto
@@ -219,7 +220,7 @@ fun ControlsScreen(
 
 /** Who plays as which player: connected controllers in the order the game takes them. */
 private fun playerOf(pads: List<TestedDevice>): List<TestedDevice?> {
-    val slots = ControllerTestModel.playerSlots(pads)
+    val slots = ControllerTestModel.playerSlots(pads, ControllerUse.descriptors)
     return List(4) { i -> pads.firstOrNull { slots[it.id] == i } }
 }
 
@@ -368,7 +369,7 @@ private fun Pads(devices: InputDevicesNow, rumble: PadRumbleState, default: Rumb
     val context = LocalContext.current
     val c = Xd.colors
     val toast = LocalXdToast.current
-    val slots = ControllerTestModel.playerSlots(devices.pads)
+    val slots = ControllerTestModel.playerSlots(devices.pads, ControllerUse.descriptors)
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (devices.pads.isEmpty()) XdNote(stringResource(R.string.ct_none), tone = NoteTone.INFO)
         devices.pads.forEach { pad ->

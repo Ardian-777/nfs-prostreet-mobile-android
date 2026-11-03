@@ -795,10 +795,10 @@ rodar jogo split-screen com duas entradas e profiles distintos.
 presente (pad de toque + primeiro controle, caminho antigo intacto), P2–P4 conectados e
 desconectados pelo frontend (`set_slot_connected`, o guest vê o controle entrar/sair via
 `NotifyDevicesChanged`), estado/packet/keystrokes por slot e rumble guardado por slot.
-`gamepad/ControllerSlots.kt` atribui controles físicos a jogadores pela ordem de chegada
-e pelo `descriptor` (quem volta recupera o slot se livre; troca de jogadores possível);
-`SlotInputRouter` aplica a P2–P4 as mesmas regras do P1 (zona morta 8%, gatilho acima da
-metade, hat) com estado por slot, e a desconexão solta só o que aquele controle segurava.
+`gamepad/ControllerSlots.kt` atribui controles físicos a jogadores pela ordem do primeiro
+aperto (#76) e pelo `descriptor` (quem volta recupera o slot se livre; troca de jogadores possível);
+`SlotInputRouter` aplica a P2–P4 as mesmas regras do P1 (zona morta 8%, gatilho analógico
+0–255 que segue o mapeamento de L2/R2 (#97), hat) com estado por slot, e a desconexão solta só o que aquele controle segurava.
 Rumble: menu "Controller rumble" Off/Low/Medium/High; o motor mais forte, escalado, vai ao
 vibrador do controle do slot (nunca ao telefone), só com o jogo rodando. Testes JVM de
 atribuição, roteamento, release e amplitude; `check-jni` cobre as 3 JNIs novas. Falta: UI
