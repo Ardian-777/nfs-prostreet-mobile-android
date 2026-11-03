@@ -137,6 +137,11 @@ public class Emulator {
     public native void change_surface(int w,int h);
 
     public native void flush_gpu_caches();
+
+    /** Why the core gave up before the title ran, or null while it hasn't: "graphics" (Vulkan
+     *  didn't start, as with a custom driver that has no device for this GPU), or "setup" or
+     *  "subsystems" and the failing status in hex. */
+    public native String boot_failure();
     
     public native void set_framerate_limit(int value);
 

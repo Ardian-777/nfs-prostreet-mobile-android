@@ -563,6 +563,11 @@ static void j_flush_gpu_caches(JNIEnv* env,jobject self){
     ae::flush_gpu_caches();
 }
 
+static jstring j_boot_failure(JNIEnv* env,jobject self){
+    const std::string reason=ae::boot_failure();
+    return reason.empty() ? nullptr : env->NewStringUTF(reason.c_str());
+}
+
 int register_Emulator(JNIEnv* env){
     static const JNINativeMethod methods[] = {
             { "setup_game_path", "(Ljava/lang/String;)V", (void *) j_setup_game_path },
@@ -577,6 +582,7 @@ int register_Emulator(JNIEnv* env){
             { "resume", "()V", (void *) j_resume },
             { "change_surface", "(II)V", (void *) j_change_surface },
             { "flush_gpu_caches", "()V", (void *) j_flush_gpu_caches },
+            { "boot_failure", "()Ljava/lang/String;", (void *) j_boot_failure },
     };
     return env->RegisterNatives(env->FindClass("xendroid/emulator/Emulator"),methods, sizeof(methods)/sizeof(methods[0]));
 }

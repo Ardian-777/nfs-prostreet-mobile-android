@@ -753,6 +753,8 @@
     <string name="host_already_running">Um jogo já está rodando. Saia dele (Voltar → Sair do jogo) antes de abrir outro.</string>
     <string name="host_launch_failed">O jogo não pôde iniciar</string>
     <string name="host_core_failed">O núcleo do emulador não iniciou: %1$s</string>
+    <string name="host_core_failed_graphics_system">O driver da GPU do celular não iniciou o Vulkan, então o jogo não tem com o que desenhar.</string>
+    <string name="host_core_failed_graphics">O driver da GPU não iniciou o Vulkan, então o jogo não tem com o que desenhar. Um driver customizado pode não ter suporte à GPU deste celular.</string>
     <string name="host_wait_config_save">Espere a configuração terminar de ser salva</string>
     <string name="host_phone_wait">Os telefones como controle podem ser ligados quando o jogo estiver rodando</string>
     <string name="host_cache_not_removed">Não deu para remover o cache de shaders</string>

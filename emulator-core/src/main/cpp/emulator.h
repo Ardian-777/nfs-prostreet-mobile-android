@@ -53,5 +53,9 @@ namespace ae{
     // normal build, and request() fails there and before the GPU runs.
     extern bool frame_trace_available();
     extern bool request_frame_trace();
+    // Why the core gave up before the title ran, empty while it hasn't:
+    // "graphics" (Vulkan didn't start), "setup XXXXXXXX" or
+    // "subsystems XXXXXXXX" (the failing X_STATUS).
+    extern std::string boot_failure();
 }
 #endif //APS3E_EMULATOR_H

@@ -191,6 +191,9 @@ class EmulatorSession {
     fun frameGenerationGpuHistogram(): LongArray? = if (booted) core.frame_generation_gpu_histogram() else null
     /** {pipeline creations, ns spent in them, in flight} since the process started; null before boot. */
     fun shaderCompileStats(): LongArray? = if (booted) core.shader_compile_stats() else null
+    /** Why the core gave up before the game ran ("graphics": Vulkan didn't start), or null while
+     *  it hasn't; null before boot. */
+    fun bootFailure(): String? = if (booted) core.boot_failure() else null
     /** {backend, blocks played, blocks concealed, device xruns} since the process started; null before boot. */
     fun audioRunStats(): LongArray? = if (booted) core.audio_run_stats() else null
     /** The diagnostic build's "Capture frame": whether the core has the GPU trace writer. */

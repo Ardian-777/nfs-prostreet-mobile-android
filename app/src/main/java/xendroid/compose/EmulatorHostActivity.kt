@@ -1038,10 +1038,36 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         recordEvent("memory", "trim level $level", flush = level >= 10)
     }
 
+    /** The core gave up before the game ran ([EmulatorSession.bootFailure]). Vulkan not starting
+     *  on a custom driver ("graphics custom": the one the core tried, from the global or the
+     *  game's config or the launch sheet) is a driver failure, with the system driver one tap
+     *  away; on the system driver ("graphics") it is not, whatever the config says. */
+    private fun showBootFailure(reason: String) {
+        val customDriver = reason == "graphics custom"
+        val graphics = customDriver || reason == "graphics"
+        showLaunchFailure(
+            when {
+                customDriver -> getString(R.string.host_core_failed_graphics)
+                graphics -> getString(R.string.host_core_failed_graphics_system)
+                else -> getString(R.string.host_core_failed, reason)
+            },
+            "The emulator core did not start: " + when {
+                customDriver -> "Vulkan did not start with the custom GPU driver"
+                graphics -> "Vulkan did not start with the system GPU driver"
+                else -> reason
+            },
+            if (customDriver) xendroid.compose.ui.ingame.LaunchFailure.Kind.DRIVER
+            else xendroid.compose.ui.ingame.LaunchFailure.Kind.CORE,
+            driverFromConfig = false)
+    }
+
     /** [shown] in the dialog, in the shown language; [logged] (English) in the run's record.
-     *  15e (DroidDeck `02f356f`): the dialog stays with Back, Try again and Share logs. */
+     *  15e (DroidDeck `02f356f`): the dialog stays with Back, Try again and Share logs.
+     *  [driverFromConfig]: a [kind] CORE becomes DRIVER when the config has a custom driver
+     *  (off when the core said which driver it tried). */
     private fun showLaunchFailure(shown: String, logged: String = shown,
-                                  kind: xendroid.compose.ui.ingame.LaunchFailure.Kind = xendroid.compose.ui.ingame.LaunchFailure.Kind.OTHER) {
+                                  kind: xendroid.compose.ui.ingame.LaunchFailure.Kind = xendroid.compose.ui.ingame.LaunchFailure.Kind.OTHER,
+                                  driverFromConfig: Boolean = true) {
         launchFailure = logged
         recordEvent("error", logged, flush = true)
         if (isFinishing || isDestroyed) return
@@ -1062,7 +1088,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 }.getOrNull().orEmpty()
             }
             // A core that did not start on a custom driver may start on the system one.
-            val customDriver = withContext(Dispatchers.IO) {
+            val customDriver = driverFromConfig && withContext(Dispatchers.IO) {
                 runCatching { inGameConfig.driverPath(activeTitleState.value) }.getOrNull()?.isNotBlank() == true
             }
             val shownKind = if (kind == xendroid.compose.ui.ingame.LaunchFailure.Kind.CORE && customDriver)
@@ -1698,6 +1724,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                                     if (runningNow) watchThermalHeadroom()
                                     val compileStats = session.shaderCompileStats()
                                     if (bootStatus.value != null) {
+                                        // The core gave up before the game ran: say why, once.
+                                        if (launchFailure == null) session.bootFailure()?.let(::showBootFailure)
                                         val elapsed = (android.os.SystemClock.elapsedRealtime() - createdAtMs) / 1000
                                         if ((guestFrames ?: 0L) > 0L) {
                                             bootStatus.value = null

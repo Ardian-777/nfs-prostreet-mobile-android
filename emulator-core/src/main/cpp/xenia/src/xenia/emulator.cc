@@ -1697,7 +1697,24 @@ void Emulator::RelaunchTitle(const std::string& host_path,
   Setup(nullptr, nullptr, require_cpu_backend_, nullptr, nullptr, nullptr);
 #endif
   MountStandardDrives();
+#if XE_PLATFORM_xendroid
+  // XenDroid: as Edge, a relaunch whose subsystems fail goes no further. On
+  // Android a graphics setup that fails returns its status instead of aborting
+  // (VulkanGraphicsSystem::Setup), and LaunchPath() on a graphics system with no
+  // command processor would crash later with no reason given: the same
+  // dashboard exit as a failed Setup() above.
+  if (const X_STATUS subsystems_status = SetupSubsystems();
+      XFAILED(subsystems_status)) {
+    XELOGE("RelaunchTitle: SetupSubsystems failed ({:08X}); aborting relaunch "
+           "to dashboard",
+           subsystems_status);
+    relaunching_ = false;
+    kernel_state_->ExitToDashboard();
+    return;
+  }
+#else
   SetupSubsystems();
+#endif
 #if XE_PLATFORM_xendroid
   XELOGI("RelaunchTitle: post-subsystems graphics_system={} presenter={}",
          static_cast<void*>(graphics_system()),

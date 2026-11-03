@@ -31,6 +31,12 @@ X_STATUS VulkanGraphicsSystem::Setup(cpu::Processor* processor,
   provider_ = xe::ui::vulkan::VulkanProvider::Create(true, with_presentation);
   if (!provider_) {
     XELOGE("Vulkan provider creation failed");
+#if XE_PLATFORM_xendroid
+    // Xendroid+: the app shows why the game didn't start and offers the
+    // system driver, where FatalError's abort closed it without a word. A
+    // custom driver may have no Vulkan device for the phone's GPU.
+    return X_STATUS_UNSUCCESSFUL;
+#endif
     xe::FatalError(
         "Unable to initialize the Vulkan graphics subsystem.\n"
         "\n"
