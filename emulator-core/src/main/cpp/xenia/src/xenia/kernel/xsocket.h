@@ -13,6 +13,7 @@
 // Asio must be included before Windows headers to avoid macro conflicts
 #include <asio.hpp>
 
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <functional>
@@ -181,6 +182,11 @@ class XSocket : public XObject {
   // Reads the local or remote address into xenia's own layout. Some hosts lay
   // sockaddr_in out differently.
   X_STATUS QueryName(bool peer, N_XSOCKADDR_IN* name);
+  // System link: a broadcast this socket sends, and whether a datagram from
+  // sender is one of them come back (a console never hears its own).
+  void NoteBroadcast(const uint8_t* buf, size_t len);
+  bool IsOwnBroadcast(const asio::ip::udp::endpoint& sender,
+                      const uint8_t* buf, size_t len);
 
   // Socket storage - either TCP or UDP
   std::optional<asio::ip::tcp::socket> tcp_socket_;
@@ -196,6 +202,12 @@ class XSocket : public XObject {
 
   bool bound_ = false;  // Explicitly bound to an IP address?
   uint16_t bound_port_ = 0;
+  // Bound below 1024, so the host port is the title's + 10000 (Bind).
+  bool port_shifted_ = false;
+  // The last broadcasts sent, hashed (NoteBroadcast).
+  std::mutex broadcasts_mutex_;
+  std::array<uint64_t, 8> broadcasts_sent_ = {};
+  uint32_t broadcasts_next_ = 0;
 
   // The guest's own FIONBIO/WSAEventSelect choice, tracked separately from the
   // socket's live flag because RunCooperatively toggles that one itself.

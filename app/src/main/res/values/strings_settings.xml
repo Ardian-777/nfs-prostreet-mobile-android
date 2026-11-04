@@ -230,6 +230,10 @@
     <string name="st_d_kernel_allow_incompatible_title_update">Applies title updates even when their signature doesn\'t match the game.</string>
     <string name="st_t_kernel_network_enabled">Networking</string>
     <string name="st_d_kernel_network_enabled">Lets games see a network connection</string>
+    <string name="st_t_network_systemlink">System link (LAN)</string>
+    <string name="st_d_network_systemlink">Play System Link with the devices on the same Wi-Fi. Turn it on in each one, then pick the game\'s System Link mode. Halo 3 also needs its \"Allow public IP addresses.\" patch on</string>
+    <string name="st_t_network_systemlink_peers">Other consoles (VPN)</string>
+    <string name="st_d_network_systemlink_peers">IP addresses of devices on another network or a VPN (ZeroTier, Tailscale), separated by commas</string>
     <string name="st_t_content_license_mask">License mask</string>
     <string name="st_d_content_license_mask">Which content licenses games see as owned: none, the first, or all (unlocks full versions of arcade games)</string>
     <string name="st_t_console_video_standard">Video standard</string>

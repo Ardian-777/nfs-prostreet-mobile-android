@@ -115,6 +115,11 @@ object SettingsSchema {
             b("Kernel", "network_enabled", "Networking", true),
         )),
 
+        SettingsCategory("Network", listOf(
+            b("Network", "systemlink", "System link (LAN)", false),
+            t("Network", "systemlink_peers", "Other consoles (VPN)", "", "100.64.0.2, 10.147.17.5"),
+        )),
+
         SettingsCategory("Controller", listOf(
             b("HID", "show_touch_overlay", "Show on-screen controller", true),
             b("HID", "vibration", "Controller vibration", true),

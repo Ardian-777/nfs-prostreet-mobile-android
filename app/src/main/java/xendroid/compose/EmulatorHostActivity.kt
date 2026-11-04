@@ -1300,7 +1300,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                     Utils.get_log_file_path(),
 
                 "--log_append=true",
-            ) + launchOptionArgs().also { launchArgsUsed = it }.toTypedArray()
+            ) + systemLinkArgs().toTypedArray() +
+                launchOptionArgs().also { launchArgsUsed = it }.toTypedArray()
         )
 
         session.setupUriInfoListFile(
@@ -1312,6 +1313,25 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     /** The options this launch passed to the core (R4), for the loading screen. */
     private var launchArgsUsed: List<String> = emptyList()
+
+    /** The Wi-Fi multicast lock, while a game runs with system link (core/SystemLink.kt). */
+    private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
+
+    /** System link's address, broadcast and Ethernet address for the core, and the multicast lock
+     *  when it is on. Read from the global config: the network is the device's, not a game's. */
+    private fun systemLinkArgs(): List<String> = runCatching {
+        val handle = xendroid.compose.settings.ConfigStore(applicationContext).openLiveSnapshot()
+        val (enabled, peers) = try {
+            handle.getBool(xendroid.compose.core.SystemLink.SECTION, xendroid.compose.core.SystemLink.ENABLED, false) to
+                handle.getString(xendroid.compose.core.SystemLink.SECTION, xendroid.compose.core.SystemLink.PEERS)
+        } finally { handle.closeDiscard() }
+        if (enabled) {
+            multicastLock = multicastLock ?: xendroid.compose.core.SystemLink.multicastLock(this)?.also { it.acquire() }
+            recordEvent("system link", "on")
+        }
+        val overVpn = !peers?.trim('"', ' ').isNullOrEmpty()
+        xendroid.compose.core.SystemLink.launchArgs(this, overVpn)
+    }.onFailure { Log.w(TAG, "System link setup failed", it) }.getOrDefault(emptyList())
 
     /** Batch 2: what the loading screen says about the launch once the title is known. */
     private fun loadingDetailsOf(title: String): xendroid.compose.ui.ingame.LoadingDetails {
@@ -2348,6 +2368,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         gameModeSignal.update(xendroid.compose.core.GamePhase.NONE)
+        runCatching { multicastLock?.release() }
+        multicastLock = null
         performanceHints.close()
         gyroCamera.stop()
         stopEventSources()
