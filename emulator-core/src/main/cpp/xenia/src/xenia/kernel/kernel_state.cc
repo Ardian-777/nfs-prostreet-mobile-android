@@ -438,6 +438,22 @@ object_ref<XModule> KernelState::GetModule(const std::string_view name,
   return nullptr;
 }
 
+object_ref<UserModule> KernelState::GetUserModuleForAddress(uint32_t address) {
+  auto global_lock = global_critical_region_.Acquire();
+  for (auto& user_module : user_modules_) {
+    if (user_module->module_format() != UserModule::kModuleFormatXex) {
+      continue;
+    }
+    auto xex_module = user_module->xex_module();
+    uint32_t base_address = xex_module->base_address();
+    if (address >= base_address &&
+        address - base_address < xex_module->xex_security_info()->image_size) {
+      return retain_object(user_module.get());
+    }
+  }
+  return nullptr;
+}
+
 object_ref<XThread> KernelState::LaunchModule(object_ref<UserModule> module) {
   if (!module->is_executable()) {
     return nullptr;
@@ -694,7 +710,7 @@ X_RESULT KernelState::FinishLoadingUserModule(
     // Call DllMain(DLL_PROCESS_ATTACH):
     // https://msdn.microsoft.com/en-us/library/windows/desktop/ms682583%28v=vs.85%29.aspx
     uint64_t args[] = {
-        module->handle(),
+        module->hmodule_ptr(),
         1,  // DLL_PROCESS_ATTACH
         0,  // 0 because always dynamic
     };
@@ -715,7 +731,15 @@ X_RESULT KernelState::ApplyTitleUpdate(
     return X_STATUS_SUCCESS;
   }
 
-  auto patch_module = LoadTitleUpdate(&title_updates.front(), title_module);
+  const xam::XCONTENT_AGGREGATE_DATA* selected_update = &title_updates.front();
+  // A module loaded later, such as a DLL, finds UPDATE mounted with the
+  // update chosen for the executable. Probing closes UPDATE after each
+  // candidate, which would take it from under the files the title has open.
+  if (title_updates.size() > 1 && !content_manager()->IsRootOpen("UPDATE")) {
+    selected_update = SelectTitleUpdate(title_updates, title_module);
+  }
+
+  auto patch_module = LoadTitleUpdate(selected_update, title_module);
   if (!patch_module) {
     return X_STATUS_SUCCESS;
   }
@@ -756,6 +780,85 @@ std::vector<xam::XCONTENT_AGGREGATE_DATA> KernelState::FindTitleUpdate(
 
   return xam_state_->content_manager()->ListContent(
       1, 0, title_id, xe::XContentType::kInstaller);
+}
+
+const xam::XCONTENT_AGGREGATE_DATA* KernelState::SelectTitleUpdate(
+    const std::vector<xam::XCONTENT_AGGREGATE_DATA>& title_updates,
+    const object_ref<UserModule> title_module) {
+  // Same policy as xenia-canary PR 1201 ("Always select most compatible and
+  // newest TU"): keep the updates built for the running executable and take
+  // the highest version. Canary matches the media id from the package
+  // container header; here the patch XEX's delta patch descriptor is used,
+  // which every title update carries whether it is a container or an
+  // extracted package. Its source digest is the hash of the base XEX signature
+  // (the same check IsPatchSignatureProper applies afterwards) and its target
+  // version is the update's version. Each candidate is mounted and loaded in
+  // turn, and the UPDATE content released again so the caller can mount the
+  // winner.
+  uint8_t title_digest[0x14];
+  mbedtls_sha1(
+      reinterpret_cast<const uint8_t*>(
+          title_module->xex_module()->xex_security_info()->rsa_signature),
+      0x100, title_digest);
+
+  const xam::XCONTENT_AGGREGATE_DATA* best_update = nullptr;
+  bool best_compatible = false;
+  uint32_t best_version = 0;
+  size_t probed = 0;
+  for (const auto& entry : title_updates) {
+    auto candidate = LoadTitleUpdate(&entry, title_module);
+    content_manager()->CloseContent("UPDATE");
+    if (!candidate || !candidate->xex_module()->is_patch()) {
+      XELOGW("Title update '{}' could not be loaded, skipping it",
+             entry.file_name());
+      continue;
+    }
+    xex2_opt_delta_patch_descriptor* descriptor = nullptr;
+    candidate->xex_module()->GetOptHeader(XEX_HEADER_DELTA_PATCH_DESCRIPTOR,
+                                          &descriptor);
+    if (!descriptor) {
+      XELOGW("Title update '{}' has no delta patch descriptor, skipping it",
+             entry.file_name());
+      continue;
+    }
+    ++probed;
+    const bool compatible =
+        memcmp(descriptor->digest_source, title_digest, 0x14) == 0;
+    const xex2_version version = descriptor->target_version();
+    XELOGI("Title update '{}': version {}.{}.{}.{}, {} for this executable",
+           entry.file_name(), +version.major, +version.minor, +version.build,
+           +version.qfe, compatible ? "built" : "not built");
+    if (!compatible && !cvars::allow_incompatible_title_update) {
+      continue;
+    }
+    // A compatible update beats an incompatible one; otherwise the newer wins.
+    const bool better = !best_update || (compatible && !best_compatible) ||
+                        (compatible == best_compatible &&
+                         descriptor->target_version_value > best_version);
+    if (better) {
+      best_update = &entry;
+      best_compatible = compatible;
+      best_version = descriptor->target_version_value;
+    }
+  }
+
+  // Only without allow_incompatible_title_update can an update that loaded
+  // be left out.
+  if (!best_update) {
+    if (probed) {
+      XELOGW(
+          "None of the {} title updates was built for this executable, trying "
+          "the first one",
+          title_updates.size());
+    } else {
+      XELOGW("None of the {} title updates could be loaded, trying the first "
+             "one",
+             title_updates.size());
+    }
+    return &title_updates.front();
+  }
+  XELOGI("Selected title update '{}'", best_update->file_name());
+  return best_update;
 }
 
 const object_ref<UserModule> KernelState::LoadTitleUpdate(
@@ -870,7 +973,7 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
     // Call DllMain(DLL_PROCESS_DETACH):
     // https://msdn.microsoft.com/en-us/library/windows/desktop/ms682583%28v=vs.85%29.aspx
     uint64_t args[] = {
-        module->handle(),
+        module->hmodule_ptr(),
         0,  // DLL_PROCESS_DETACH
         0,  // 0 for now, assume XexUnloadImage is like FreeLibrary
     };
@@ -935,11 +1038,24 @@ void KernelState::UnregisterThread(XThread* thread) {
   }
 }
 
+// The kernel only notifies DLLs about threads of the title process. A thread of
+// another process taking a DLL's DLL_PROCESS_ATTACH would run the module's
+// process init, including its KeTlsAlloc calls, in that process. Host threads
+// aren't console threads at all.
+static bool NotifiesDlls(XThread* thread) {
+  return thread->is_guest_thread() &&
+         thread->guest_object<X_KTHREAD>()->process_type == X_PROCTYPE_TITLE;
+}
+
 void KernelState::OnThreadExecute(XThread* thread) {
   auto global_lock = global_critical_region_.Acquire();
 
   // Must be called on executing thread.
   assert_true(XThread::GetCurrentThread() == thread);
+
+  if (!NotifiesDlls(thread)) {
+    return;
+  }
 
   // Call DllMain(DLL_THREAD_ATTACH) for each user module:
   // https://msdn.microsoft.com/en-us/library/windows/desktop/ms682583%28v=vs.85%29.aspx
@@ -947,7 +1063,7 @@ void KernelState::OnThreadExecute(XThread* thread) {
   for (auto user_module : user_modules_) {
     if (user_module->is_dll_module() && user_module->entry_point()) {
       uint64_t args[] = {
-          user_module->handle(),
+          user_module->hmodule_ptr(),
           user_module->is_attached()
               ? static_cast<uint64_t>(2)   // DLL_THREAD_ATTACH - Used to call
                                            // DLL for each thread created.
@@ -973,10 +1089,12 @@ void KernelState::OnThreadExit(XThread* thread) {
   // Call DllMain(DLL_THREAD_DETACH) for each user module:
   // https://msdn.microsoft.com/en-us/library/windows/desktop/ms682583%28v=vs.85%29.aspx
   auto thread_state = thread->thread_state();
+  const bool notifies_dlls = NotifiesDlls(thread);
   for (auto user_module : user_modules_) {
-    if (user_module->is_dll_module() && user_module->entry_point()) {
+    if (notifies_dlls && user_module->is_dll_module() &&
+        user_module->entry_point()) {
       uint64_t args[] = {
-          user_module->handle(),
+          user_module->hmodule_ptr(),
           3,  // DLL_THREAD_DETACH
           0,  // 0 because always dynamic
       };

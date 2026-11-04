@@ -45,7 +45,12 @@ std::unique_ptr<MappedMemory> DiscImageEntry::OpenMapped(
   }
 
   size_t real_offset = data_offset_ + offset;
+  // A truncated image ends before the entry does: only what it maps.
+  if (real_offset >= mmap_->size()) {
+    return nullptr;
+  }
   size_t real_length = length ? std::min(length, data_size_) : data_size_;
+  real_length = std::min(real_length, mmap_->size() - real_offset);
   return mmap_->Slice(real_offset, real_length);
 }
 

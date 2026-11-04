@@ -238,6 +238,8 @@ class KernelState {
   bool IsModuleLoaded(const std::string_view name);
   object_ref<XModule> GetModule(const std::string_view name,
                                 bool user_only = false);
+  // Returns the loaded XEX module whose image contains the guest address.
+  object_ref<UserModule> GetUserModuleForAddress(uint32_t address);
 
   object_ref<XThread> LaunchModule(object_ref<UserModule> module);
   object_ref<UserModule> GetExecutableModule();
@@ -364,6 +366,11 @@ class KernelState {
 
   std::vector<xam::XCONTENT_AGGREGATE_DATA> FindTitleUpdate(
       const uint32_t title_id) const;
+  // Picks the most compatible and newest of several title updates. Returns a
+  // pointer into title_updates.
+  const xam::XCONTENT_AGGREGATE_DATA* SelectTitleUpdate(
+      const std::vector<xam::XCONTENT_AGGREGATE_DATA>& title_updates,
+      const object_ref<UserModule> title_module);
   const object_ref<UserModule> LoadTitleUpdate(
       const xam::XCONTENT_AGGREGATE_DATA* title_update,
       const object_ref<UserModule> module);

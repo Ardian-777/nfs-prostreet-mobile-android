@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <algorithm>
 #include <cwctype>
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
@@ -296,9 +297,16 @@ void RtlCopyUnicodeString_entry(pointer_t<X_UNICODE_STRING> destination,
   if (length > 0) {
     auto dst_buf = kernel_memory()->TranslateVirtual(destination->pointer);
     auto src_buf = kernel_memory()->TranslateVirtual(source->pointer);
-    std::memcpy(dst_buf, src_buf, length * 2);
+    // Lengths are in bytes, not characters.
+    std::memcpy(dst_buf, src_buf, length);
   }
   destination->length = length;
+  // Like NT, terminate the copy when the destination has room for it.
+  if (destination->pointer && length + 2 <= destination->maximum_length) {
+    auto dst_buf =
+        kernel_memory()->TranslateVirtual<uint16_t*>(destination->pointer);
+    dst_buf[length / 2] = 0;
+  }
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlCopyUnicodeString, kNone, kImplemented);
 
@@ -331,16 +339,20 @@ dword_result_t RtlUnicodeStringToAnsiString_entry(
     destination_ptr->pointer = static_cast<uint32_t>(buffer_ptr);
   } else {
     uint32_t buffer_capacity = destination_ptr->maximum_length;
+    if (!buffer_capacity) {
+      return X_STATUS_BUFFER_OVERFLOW;
+    }
     auto buffer_ptr =
         kernel_memory()->TranslateVirtual(destination_ptr->pointer);
+    size_t copy_length = ansi_str.size();
     if (buffer_capacity < ansi_str.size() + 1) {
       // Too large - we just write what we can.
       result = X_STATUS_BUFFER_OVERFLOW;
-      memcpy(buffer_ptr, ansi_str.data(), buffer_capacity - 1);
-    } else {
-      memcpy(buffer_ptr, ansi_str.data(), ansi_str.size() + 1);
+      copy_length = buffer_capacity - 1;
     }
-    buffer_ptr[buffer_capacity - 1] = 0;  // \0
+    std::copy_n(ansi_str.data(), copy_length, buffer_ptr);
+    buffer_ptr[copy_length] = 0;  // \0
+    destination_ptr->length = static_cast<uint16_t>(copy_length);
   }
   return result;
 }
@@ -866,6 +878,63 @@ void RtlGetStackLimits_entry(lpdword_t out_end, lpdword_t out_base,
   *out_end = stack_end;
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlGetStackLimits, kNone, kImplemented);
+
+// The kernel's RtlCaptureContext is a system call and reports the iar after its
+// sc, where an unwinder finds no function entry and steps out to lr. The
+// caller's import thunk has no function entry either, so it stands in.
+static uint32_t CapturedContextIar(uint32_t lr) {
+  if (auto module = kernel_state()->GetUserModuleForAddress(lr)) {
+    for (const auto& library : *module->xex_module()->import_libraries()) {
+      if (library.name != "xboxkrnl.exe") {
+        continue;
+      }
+      for (const auto& import : library.imports) {
+        if (import.ordinal == ordinals::RtlCaptureContext &&
+            import.thunk_address) {
+          return import.thunk_address;
+        }
+      }
+    }
+  }
+  return lr;
+}
+
+// The import thunk leaves the caller's registers in the guest context.
+void RtlCaptureContext_entry(lpvoid_t context_record,
+                             const ppc_context_t& ctx) {
+  auto p = context_record.as<uint8_t*>();
+  const uint32_t lr = static_cast<uint32_t>(ctx->lr);
+  xe::store_and_swap<uint32_t>(p + kContextFlags,
+                               kContextControl | kContextFloatingPoint |
+                                   kContextInteger | kContextVector);
+  xe::store_and_swap<uint32_t>(p + kContextMsr,
+                               static_cast<uint32_t>(ctx->msr));
+  xe::store_and_swap<uint32_t>(p + kContextIar, CapturedContextIar(lr));
+  xe::store_and_swap<uint32_t>(p + kContextLr, lr);
+  xe::store_and_swap<uint64_t>(p + kContextCtr, ctx->ctr);
+  for (size_t i = 0; i < 32; ++i) {
+    xe::store_and_swap<uint64_t>(p + kContextGpr + i * 8, ctx->r[i]);
+  }
+  xe::store_and_swap<uint32_t>(p + kContextCr,
+                               static_cast<uint32_t>(ctx->cr()));
+  xe::store_and_swap<uint32_t>(p + kContextXer, ctx->xer());
+  xe::store_and_swap<uint64_t>(p + kContextFpscr, ctx->fpscr.value);
+  for (size_t i = 0; i < 32; ++i) {
+    xe::store_and_swap<double>(p + kContextFpr + i * 8, ctx->f[i]);
+  }
+  xe::store_and_swap<uint32_t>(p + kContextUserModeControl, 0);
+  for (size_t i = 0; i < 4; ++i) {
+    xe::store_and_swap<uint32_t>(p + kContextVscr + i * 4,
+                                 ctx->vscr_vec.u32[i]);
+  }
+  for (size_t i = 0; i < 128; ++i) {
+    for (size_t j = 0; j < 4; ++j) {
+      xe::store_and_swap<uint32_t>(p + kContextVr + i * 16 + j * 4,
+                                   ctx->v[i].u32[j]);
+    }
+  }
+}
+DECLARE_XBOXKRNL_EXPORT1(RtlCaptureContext, kNone, kImplemented);
 
 }  // namespace xboxkrnl
 }  // namespace kernel

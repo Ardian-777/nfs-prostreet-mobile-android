@@ -6,7 +6,8 @@
 # the XEX header and title update patch bounds, the names installed content
 # packages take, the socket option values and the XNet startup parameters.
 # They need only a C++20 compiler.
-# With XENDROID_NDK, also host threads: APCs alerted at once to several threads.
+# With XENDROID_NDK, also host threads: APCs alerted at once to several threads,
+# and waits given the same handle twice.
 #
 # Compiler: $CXX (default c++). On a host without one (no libstdc++/glibc headers,
 # as in a bare WSL), set XENDROID_NDK to an NDK root: the tests are then built as

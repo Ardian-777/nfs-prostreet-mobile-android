@@ -188,11 +188,20 @@ DECLARE_XAM_EXPORT1(XamBuildXamResourceLocator, kNone, kImplemented);
 dword_result_t XamGetCachedTitleName_entry(dword_t title_id,
                                            dword_t title_name_address,
                                            lpdword_t title_name_length_ptr) {
+  if (!title_name_address || !title_name_length_ptr) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
   char16_t* title_name_ptr =
       kernel_state()->memory()->TranslateVirtual<char16_t*>(title_name_address);
+  // The length is in/out: the buffer capacity in characters in, the name
+  // length including the terminator out.
+  const uint32_t buffer_count = *title_name_length_ptr;
 
   if (!title_id) {
-    *title_name_ptr = 0;
+    if (buffer_count) {
+      *title_name_ptr = 0;
+    }
     *title_name_length_ptr = 1;
 
     return X_ERROR_INVALID_PARAMETER;
@@ -204,11 +213,12 @@ dword_result_t XamGetCachedTitleName_entry(dword_t title_id,
       kernel_state()->emulator()->game_info_database()->GetTitleName());
 
   xe::string_util::copy_and_swap_truncating(title_name_ptr, title_name,
-                                            title_name.size() + 1);
+                                            buffer_count);
 
-  *title_name_length_ptr = title_name.size() + 1;
+  *title_name_length_ptr = static_cast<uint32_t>(title_name.size() + 1);
 
-  return X_ERROR_SUCCESS;
+  return buffer_count < title_name.size() + 1 ? X_ERROR_INSUFFICIENT_BUFFER
+                                              : X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamGetCachedTitleName, kNone, kImplemented);
 
@@ -814,22 +824,6 @@ void XamGetActiveDashAppInfo_entry(pointer_t<X_DASH_APP_INFO> dash_app) {
               sizeof(X_DASH_APP_INFO));
 }
 DECLARE_XAM_EXPORT1(XamGetActiveDashAppInfo, kNone, kImplemented);
-
-dword_result_t XamGetDashBackstackData_entry(
-    pointer_t<X_DASH_BACKSTACK_DATA> backstack_data, lpdword_t count) {
-  auto xam_state_ = kernel_state()->xam_state();
-  uint32_t total = xam_state_->dash_backstack_nodes_count_;
-  if (total) {
-    if (*count <= total) {
-      total = *count;
-    }
-    std::memcpy(backstack_data, &xam_state_->dash_backstack_data_,
-                sizeof(X_DASH_BACKSTACK_DATA) * total);
-    xam_state_->dash_backstack_nodes_count_ = 0;
-  }
-  return X_ERROR_SUCCESS;
-}
-DECLARE_XAM_EXPORT1(XamGetDashBackstackData, kNone, kImplemented);
 
 void XampWebInstrumentationSetProfileCounts_entry(dword_t live_profiles,
                                                   dword_t local_profiles,

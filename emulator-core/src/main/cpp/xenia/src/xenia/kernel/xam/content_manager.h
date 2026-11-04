@@ -284,6 +284,8 @@ class ContentManager {
                          const XCONTENT_AGGREGATE_DATA& data);
   std::filesystem::path ResolveGameUserContentPath(const uint64_t xuid);
   bool IsContentOpen(const std::filesystem::path& package_path) const;
+  // Whether content is mounted under |root_name| (such as "UPDATE").
+  bool IsRootOpen(const std::string_view root_name);
   void CloseOpenedFilesFromContent(const ContentPackage& package);
 
   uint64_t GetContentTotalSpace() const;

@@ -1,7 +1,8 @@
 // Native test of Thread::QueueUserCallback (the host side of guest APCs and
 // NtAlertThread): callbacks queued at the same time to different threads must
 // each run on their own target thread, during an alertable wait, and never on
-// another thread or with no target at all.
+// another thread or with no target at all. Also multi-object waits given the
+// same handle twice, which the cooperative scheduler polls with a 0 ms timeout.
 //
 // Built for Android (the fork's XE_PLATFORM_xendroid path) as a static x86_64
 // executable by tools/test-native-logic.sh, with the logging calls stubbed.
@@ -113,11 +114,32 @@ void concurrent_callbacks_stay_on_their_targets() {
   check(total > 0, "no callback ran");
 }
 
+// A handle passed twice: a wait-any still times out, then succeeds on the
+// first slot, and a wait-all fails as on Windows. Each used to spin forever.
+void repeated_handle_waits_end() {
+  using xe::threading::WaitResult;
+  auto event = xe::threading::Event::CreateManualResetEvent(false);
+  auto other = xe::threading::Event::CreateManualResetEvent(false);
+  auto any = xe::threading::WaitAny({event.get(), other.get(), event.get()},
+                                    false, 0ms);
+  check(any.first == WaitResult::kTimeout,
+        "a wait-any on a repeated handle did not time out");
+  event->Set();
+  any = xe::threading::WaitAny({event.get(), other.get(), event.get()}, false,
+                               0ms);
+  check(any.first == WaitResult::kSuccess && any.second == 0,
+        "a wait-any on a repeated handle did not end on its first slot");
+  check(xe::threading::WaitAll({event.get(), other.get(), event.get()}, false,
+                               0ms) == WaitResult::kFailed,
+        "a wait-all on a repeated handle did not fail");
+}
+
 }  // namespace
 
 int main() {
   single_callback_runs_on_its_thread();
   concurrent_callbacks_stay_on_their_targets();
+  repeated_handle_waits_end();
   if (failures) {
     std::fprintf(stderr, "threading_apc_test: %d failure(s)\n", failures);
     return 1;
