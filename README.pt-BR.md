@@ -12,6 +12,7 @@
   <img alt="arm64-v8a" src="https://img.shields.io/badge/ABI-arm64--v8a-2B2D31">
   <img alt="Vulkan" src="https://img.shields.io/badge/Vulkan-Adreno%20%7C%20Turnip-AC162C?logo=vulkan&logoColor=white">
   <a href="https://discord.gg/AT8Bswv62"><img alt="Discord" src="https://img.shields.io/badge/Discord-comunidade-5865F2?logo=discord&logoColor=white"></a>
+  <a href="https://buymeacoffee.com/phforner0"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-apoie-FFDD00?logo=buymeacoffee&logoColor=black"></a>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <b>Português (Brasil)</b></p>
@@ -159,3 +160,7 @@ extraídas de hardware que você possui.
 ## Comunidade
 
 Participe da conversa no [Discord](https://discord.gg/AT8Bswv62).
+
+O Xendroid+ é gratuito. Se quiser ajudar a pagar servidores de compilação e aparelhos de
+teste, você pode apoiar o projeto no [Buy Me a Coffee](https://buymeacoffee.com/phforner0).
+É voluntário e não libera nenhum recurso.

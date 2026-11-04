@@ -137,6 +137,7 @@ function footer(site, page, r, L) {
           <li><a href="${site.config.repoUrl}" rel="noopener">${tx('Source code on GitHub', 'Código-fonte no GitHub')}</a></li>
           <li><a href="${doc('compilar-e-contribuir')}">${tx('Build and contribute', 'Compilar e contribuir')}</a></li>
           <li><a href="${site.config.discord}" rel="noopener">${tx('Community on Discord', 'Comunidade no Discord')}</a></li>
+          <li><a href="${site.config.support}" rel="noopener">${tx('Support the project', 'Apoie o projeto')}</a></li>
           <li><a href="${doc('dados-do-site')}">${tx('Where the site data comes from', 'De onde vêm os dados do site')}</a></li>
         </ul>
       </section>
