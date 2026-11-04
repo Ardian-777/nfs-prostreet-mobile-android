@@ -753,6 +753,8 @@
     <string name="host_already_running">A game is already running. Exit it (Back → Exit game) before starting another.</string>
     <string name="host_launch_failed">The game could not start</string>
     <string name="host_core_failed">The emulator core did not start: %1$s</string>
+    <string name="host_core_failed_graphics_system">The phone\'s GPU driver did not start Vulkan, so the game has nothing to draw with.</string>
+    <string name="host_core_failed_graphics">The GPU driver did not start Vulkan, so the game has nothing to draw with. A custom driver may not support this phone\'s GPU.</string>
     <string name="host_wait_config_save">Wait for the configuration save to finish</string>
     <string name="host_phone_wait">Phone controllers can be turned on once the game is running</string>
     <string name="host_cache_not_removed">Could not remove the shader cache</string>

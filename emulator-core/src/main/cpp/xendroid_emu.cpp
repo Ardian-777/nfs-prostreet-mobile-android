@@ -16,7 +16,9 @@
 #include <android/log.h>
 #include <jni.h>
 #include <array>
+#include <atomic>
 #include <filesystem>
+#include <system_error>
 #include <memory>
 #include <sys/prctl.h>
 
@@ -117,12 +119,30 @@ DECLARE_bool(debug);
 // (black screen with working CPU/audio). We force it true after config load so a
 // stale/edited global config can't black-screen the app.
 DECLARE_bool(host_present_from_non_ui_thread);
+DECLARE_string(vulkan_lib_path);
 
 DEFINE_bool(discord, false, "Enable Discord rich presence", "General");
 
 extern JavaVM* g_jvm;
 namespace ae{
     extern std::unique_ptr<xe::ui::WindowedApp> g_windowed_app;
+
+    // Why the core gave up before the title ran, for the app's failure
+    // screen: empty while it hasn't.
+    static std::mutex boot_failure_mutex;
+    static std::string boot_failure_reason;
+    // Set once the subsystems are up. Before that, and after a boot that failed, the audio
+    // system has no worker to signal its pause fence, and the graphics system may have no
+    // command processor: pause() and resume() wait for it.
+    static std::atomic<bool> subsystems_ready{false};
+    static void set_boot_failure(std::string reason){
+        std::lock_guard<std::mutex> lock(boot_failure_mutex);
+        boot_failure_reason=std::move(reason);
+    }
+    std::string boot_failure(){
+        std::lock_guard<std::mutex> lock(boot_failure_mutex);
+        return boot_failure_reason;
+    }
 }
 void AndroidWindowedAppContext::NotifyUILoopOfPendingFunctions() {
     // Only ever called from non-UI threads (emu_thr at boot, binder thread for
@@ -481,6 +501,10 @@ void EmulatorApp::emu_thr_main() {
 
     JNIEnv *env;
     g_jvm->AttachCurrentThread(&env, nullptr);
+    // XenDroid: every way out of this thread detaches it from the JVM, the early returns of
+    // a failed boot too: a native thread that ends attached can abort the process (CheckJNI,
+    // some ART versions), as the relaunch thread in xam_info.cc notes.
+    struct JvmDetach { ~JvmDetach() { g_jvm->DetachCurrentThread(); } } jvm_detach;
 
     xe::threading::set_name("Emulator");
     xe::Profiler::ThreadEnter("Emulator");
@@ -492,6 +516,7 @@ void EmulatorApp::emu_thr_main() {
             create_audio_system, create_graphics_system, create_input_drivers);
     if (XFAILED(result)) {
         XELOGE("Failed to setup emulator: {:08X}", result);
+        ae::set_boot_failure(fmt::format("setup {:08X}", result));
         app_context().RequestDeferredQuit();
         return;
     }
@@ -502,9 +527,24 @@ void EmulatorApp::emu_thr_main() {
     // and the first Vd* kernel call (e.g. VdSetGraphicsInterruptCallback) crashes.
     if (XFAILED(result = emu->SetupSubsystems())) {
         XELOGE("Failed to setup subsystems: {:08X}", result);
+        // A graphics system without a provider: Vulkan didn't start, as with
+        // a custom driver that has no device for this GPU. "graphics custom" when
+        // the driver it tried is a custom one (from the global or the game's
+        // config, or the launch sheet), which the system driver may replace;
+        // VulkanInstance takes the system driver when that file is missing.
+        xe::gpu::GraphicsSystem* graphics = emu->graphics_system();
+        std::error_code exists_error;
+        const bool custom_driver =
+            !cvars::vulkan_lib_path.empty() &&
+            std::filesystem::exists(cvars::vulkan_lib_path, exists_error);
+        ae::set_boot_failure(
+            graphics && !graphics->provider()
+                ? std::string(custom_driver ? "graphics custom" : "graphics")
+                : fmt::format("subsystems {:08X}", result));
         app_context().RequestDeferredQuit();
         return;
     }
+    ae::subsystems_ready.store(true, std::memory_order_release);
     app_context().CallInUIThread(
             [this]() { emu_window->SetupGraphicsSystemPresenterPainting(); });
     const auto fs = emu->file_system();
@@ -796,7 +836,11 @@ namespace ae{
 
         prctl(PR_SET_TIMERSLACK,1,0,0,0);
 
-        AndroidWindowedAppContext wnd_ctx;
+        // Never destroyed: when the core gives up before the game runs, the loop
+        // quits and this thread ends, but the app's surface calls still reach
+        // the context through g_app_context (and the app through its
+        // reference) until the process goes.
+        AndroidWindowedAppContext& wnd_ctx=*new AndroidWindowedAppContext();
         wnd_ctx.setup_ui_thr_id(std::this_thread::get_id());
         g_app_context=&wnd_ctx;
         g_windowed_app=xe::ui::GetWindowedAppCreator()(wnd_ctx);
@@ -928,11 +972,16 @@ namespace ae{
         // marshal via CallInUIThread (that is the surface-marshaling path; redundant +
         // would stall the paint pump). g_windowed_app_ref->emu is null until the detached
         // boot thread populates it, so guard exactly like is_paused()/is_running().
-        if(g_windowed_app_ref && g_windowed_app_ref->emu)
+        // Only once the subsystems are up (subsystems_ready): a pause before that,
+        // during setup or after a boot failure, would wait for good on the pause fence
+        // of an audio system whose worker never started.
+        if(g_windowed_app_ref && g_windowed_app_ref->emu &&
+           subsystems_ready.load(std::memory_order_acquire))
             g_windowed_app_ref->emu->Pause();
     }
     void resume(){
-        if(g_windowed_app_ref && g_windowed_app_ref->emu)
+        if(g_windowed_app_ref && g_windowed_app_ref->emu &&
+           subsystems_ready.load(std::memory_order_acquire))
             g_windowed_app_ref->emu->Resume();
     }
     void quit(){
