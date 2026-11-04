@@ -518,7 +518,6 @@ spv::Id SpirvShaderTranslator::RoundTowardZero(spv::Id rounded, spv::Id error,
   spv::Id type = builder_->getTypeId(rounded);
   int component_count = builder_->getNumComponents(rounded);
   spv::Id type_bool = type_bool_vectors_[component_count - 1];
-  spv::Id type_uint = type_uint_vectors_[component_count - 1];
   spv::Id const_zero = const_float_vectors_0_[component_count - 1];
   auto splat = [&](spv::Id vector_type, spv::Id scalar) {
     if (component_count == 1) {
@@ -545,7 +544,27 @@ spv::Id SpirvShaderTranslator::RoundTowardZero(spv::Id rounded, spv::Id error,
   step =
       builder_->createBinOp(spv::OpLogicalAnd, type_bool, step,
                             compare(spv::OpFOrdNotEqual, rounded, const_zero));
-  // Overflow from finite operands saturates.
+  // XenDroid: the step is float arithmetic, unlike upstream's select of the
+  // bits minus 1. Mesa turns that select into an integer add of the bits, and
+  // ir3 then folds the saturate of the guest instruction into the add as an
+  // integer saturation, so the result isn't clamped any more: in Forza
+  // Horizon, the fade of the tree impostors (mul_sat at ucode address 28 of
+  // vertex shader 3BC346726C1C2535) scaled the quads over the sky. The rounded
+  // value times the float below 1, 1 - 2^-24, rounded to nearest even, is the
+  // float one ulp closer to zero: the exact product is more than half an ulp
+  // and less than an ulp below the rounded value, or the float below it
+  // exactly at a power of 2. Except at the smallest normal, whose float below
+  // is a denormal: the product ties, and may round back up to it (it does on
+  // the Adreno 825), where the Xenos would flush to zero. Checked on the
+  // Adreno 825 for every normal float.
+  spv::Id result = builder_->createNoContractionBinOp(
+      spv::OpFMul, type, rounded,
+      builder_->createTriOp(
+          spv::OpSelect, type, step,
+          splat(type, builder_->makeFloatConstant(1.0f - 0x1.0p-24f)),
+          const_float_vectors_1_[component_count - 1]));
+  // Overflow from finite operands saturates, to the largest float with the
+  // sign of the infinity.
   spv::Id const_infinity = splat(type, builder_->makeFloatConstant(INFINITY));
   spv::Id overflowed = builder_->createBinOp(
       spv::OpLogicalAnd, type_bool,
@@ -554,14 +573,13 @@ spv::Id SpirvShaderTranslator::RoundTowardZero(spv::Id rounded, spv::Id error,
           spv::OpLogicalAnd, type_bool,
           compare(spv::OpFOrdNotEqual, absolute(a), const_infinity),
           compare(spv::OpFOrdNotEqual, absolute(b), const_infinity)));
-  step = builder_->createBinOp(spv::OpLogicalOr, type_bool, step, overflowed);
-  spv::Id stepped = builder_->createUnaryOp(
-      spv::OpBitcast, type,
-      builder_->createBinOp(
-          spv::OpISub, type_uint,
-          builder_->createUnaryOp(spv::OpBitcast, type_uint, rounded),
-          splat(type_uint, builder_->makeUintConstant(1))));
-  return builder_->createTriOp(spv::OpSelect, type, step, stepped, rounded);
+  return builder_->createTriOp(
+      spv::OpSelect, type, overflowed,
+      builder_->createTriBuiltinCall(
+          type, ext_inst_glsl_std_450_, GLSLstd450FClamp, rounded,
+          splat(type, builder_->makeFloatConstant(-FLT_MAX)),
+          splat(type, builder_->makeFloatConstant(FLT_MAX))),
+      result);
 }
 
 bool SpirvShaderTranslator::RoundsTowardZero() const {
