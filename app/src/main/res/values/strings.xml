@@ -632,7 +632,7 @@
     <string name="pt_not_removed">Not removed: %1$s</string>
     <string name="pt_yours">yours: %1$s</string>
     <string name="pt_load_failed">Failed to load patches</string>
-    <string name="ct_intro">Press every button and move every stick. What you press here reaches no game. Hold B for a second, or use Back, to leave.</string>
+    <string name="ct_intro">Press every button and move every stick. What you press here reaches no game. Hold B for a second, or use Back, to leave. In a game, controllers take players in the order they first press a button.</string>
     <string name="ct_none">No controller connected. Pair one over Bluetooth or plug it in.</string>
     <string name="ct_connections">Connections</string>
     <string name="ct_src_gamepad">gamepad</string>
@@ -914,6 +914,7 @@
     <string name="tv_on">TV · %1$s · %2$s Hz</string>
     <string name="ct_plays_as">In a game started now: P%1$d</string>
     <string name="ct_no_slot">In a game started now: no free player (P1–P4 taken)</string>
+    <string name="ct_plays_on_press">Next free player on first press</string>
     <string name="ge_camera_speed">Touch camera speed: %1$d%%</string>
     <string name="ge_camera_area">Touch camera area: right %1$d%% of the screen</string>
     <string name="lib_last_profile">Last played as %1$s</string>

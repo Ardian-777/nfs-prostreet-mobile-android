@@ -1,6 +1,8 @@
 package xendroid.compose.ui.keymap
 
 import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.Window
 import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +27,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -40,15 +44,18 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import xendroid.compose.R
 import xendroid.compose.data.GameButton
 import xendroid.compose.data.GameButtons
+import xendroid.compose.gamepad.AnalogTriggers
 import xendroid.compose.ui.design.Gamepads
 import xendroid.compose.ui.design.LocalSwapConfirm
 import xendroid.compose.ui.design.LocalXdToast
@@ -262,10 +269,36 @@ private fun KeyCaptureSheet(label: String, current: String, onKey: (Int) -> Unit
     val c = Xd.colors
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    // One capture per sheet: a pad may send a trigger both as its L2/R2 key and as an axis.
+    val taken = remember { booleanArrayOf(false) }
+    val currentOnKey by rememberUpdatedState(onKey)
+    fun take(key: Int) {
+        if (taken[0]) return
+        taken[0] = true
+        currentOnKey(key)
+    }
     XdSheet(onDismiss = onDismiss, title = stringResource(R.string.km_press, label), actions = {
         XdButton(stringResource(R.string.xd_km_leave_unbound), { onKey(0) }, kind = XdButtonKind.GHOST)
         XdButton(stringResource(R.string.common_cancel), onDismiss)
     }) {
+        // #97: a pad in analog mode sends its triggers only as axes. Past half way they stand
+        // for its L2 and R2 keys, whose mapping the game's trigger axes follow. The sheet is a
+        // dialog: the controller's motion goes to its own window, not to the activity's.
+        val view = LocalView.current
+        DisposableEffect(view) {
+            val window = (view.parent as? DialogWindowProvider)?.window
+            val original = window?.callback
+            if (window != null && original != null) {
+                window.callback = object : Window.Callback by original {
+                    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+                        val key = triggerKeyOf(event) ?: return original.dispatchGenericMotionEvent(event)
+                        take(key)
+                        return true
+                    }
+                }
+            }
+            onDispose { if (window != null && original != null) window.callback = original }
+        }
         Column(
             Modifier.fillMaxWidth().focusRequester(focus).focusable()
                 .onKeyEvent { ev ->
@@ -274,7 +307,7 @@ private fun KeyCaptureSheet(label: String, current: String, onKey: (Int) -> Unit
                     // Back from the phone itself (not a controller's Select) leaves without binding.
                     if (native.keyCode == AndroidKeyEvent.KEYCODE_BACK && !Gamepads.isController(InputDevice.getDevice(native.deviceId))) {
                         onDismiss()
-                    } else if (native.repeatCount == 0) onKey(native.keyCode)
+                    } else if (native.repeatCount == 0) take(native.keyCode)
                     true
                 }
                 .padding(vertical = 10.dp),
@@ -287,6 +320,19 @@ private fun KeyCaptureSheet(label: String, current: String, onKey: (Int) -> Unit
             Text(stringResource(R.string.km_waiting), style = XdText.label, color = c.fg)
             Text(stringResource(R.string.km_now, current), style = XdText.small, color = c.fg3)
         }
+    }
+}
+
+/** L2 or R2 for a trigger axis pushed past half way, as the game's triggers read them (#97). */
+private fun triggerKeyOf(event: MotionEvent): Int? {
+    if (event.source and InputDevice.SOURCE_JOYSTICK != InputDevice.SOURCE_JOYSTICK) return null
+    val half = AnalogTriggers.BUTTON_THRESHOLD
+    return when {
+        maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)) > half ->
+            AndroidKeyEvent.KEYCODE_BUTTON_L2
+        maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) > half ->
+            AndroidKeyEvent.KEYCODE_BUTTON_R2
+        else -> null
     }
 }
 

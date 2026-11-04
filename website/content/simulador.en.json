@@ -497,7 +497,7 @@
  "data-hudex=\"1\" class=\"hud2": "data-hudex=\"1\" class=\"hud2",
  "Fechar aviso": "Dismiss warning",
  "Controles é uma área do app: toque, controles físicos, vibração e giroscópio e telefones, com as ferramentas de mapeamento, editor de toque, teste e celular como controle.": "Controls is an area of the app: touch, physical controllers, vibration and gyroscope, and phones, with the tools for key mapping, touch editing, testing and phone as controller.",
- "Quem joga como P1 a P4, na ordem em que os controles conectaram. Sem controle, o P1 são os controles de toque.": "Who plays as P1 to P4, in the order the controllers connected. With no controller, P1 is the touch controls.",
+ "Quem joga como P1 a P4, na ordem do primeiro botão apertado. Sem controle, o P1 são os controles de toque.": "Who plays as P1 to P4, in the order they first press a button. With no controller, P1 is the touch controls.",
  "Um interruptor só para os controles de toque; um jogo pode mudar isso na própria ficha.": "One switch just for the touch controls; a game can override it in its Details.",
  "Os ajustes gerais do toque valem para o controle inteiro: visual, opacidade, esconder sozinho, vibração ao tocar, tela dividida, deslizar o dedo e câmera por toque.": "The general touch settings apply to the whole pad: look, opacity, hide by itself, haptics, split screen, finger sliding and touch camera.",
  "Layouts salvos (até 30, nome com até 40 caracteres): aplicar com a prévia do que muda, exportar, importar um arquivo conferido (até 256 KB) e apagar.": "Saved layouts (up to 30, names up to 40 characters): apply with a preview of what changes, export, import a checked file (up to 256 KB) and delete.",

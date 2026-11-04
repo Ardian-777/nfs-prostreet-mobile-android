@@ -4,8 +4,9 @@ import kotlin.math.abs
 
 /**
  * I01: which physical controller plays as which player. The first controller shares P1
- * with the on-screen pad; the next ones take P2..P4 in arrival order. A controller that
- * comes back (same device descriptor) gets its previous slot again when it is still free.
+ * with the on-screen pad; the next ones take P2..P4 in the order they first play (#76). A
+ * controller that comes back (same device descriptor) gets its previous slot again when it
+ * is still free.
  * Thread-safe: controllers come from the main thread, companion phones from their sockets.
  */
 class ControllerSlots(private val slotCount: Int = 4) {
@@ -62,7 +63,7 @@ class ControllerSlots(private val slotCount: Int = 4) {
 
 /**
  * I03: the input of controllers playing P2..P4, turned into guest key events per slot
- * with the same rules as P1's path (8% stick deadzone, triggers past half way, hat at
+ * with the same rules as P1's path (8% stick deadzone, triggers as [AnalogTriggers], hat at
  * half deflection). Each slot keeps its own pressed state, so a disconnect or a menu
  * releases exactly what that controller held.
  */
@@ -74,7 +75,8 @@ class SlotInputRouter(
         val keys = HashMap<Long, Int>()                 // key identity -> guest key
         val axisPressed = BooleanArray(24)
         val axisValue = IntArray(24) { Int.MIN_VALUE }
-        val held = BooleanArray(24)                     // triggers and hat directions
+        val held = BooleanArray(24)                     // hat directions
+        val triggers = AnalogTriggers.Sent()
     }
 
     private val pads = HashMap<Int, Pad>()
@@ -85,6 +87,11 @@ class SlotInputRouter(
         if (pad.keys.put(identity, key) == null) send(slot, key, true, KEY_VALUE_UNUSED)
     }
 
+    /** Forgets a held key without releasing it: what it pressed is the trigger axis's now (#97). */
+    fun forget(slot: Int, identity: Long) {
+        pads[slot]?.keys?.remove(identity)
+    }
+
     /** True when this slot held the key (the event is consumed). */
     fun keyUp(slot: Int, identity: Long): Boolean {
         val key = pads[slot]?.keys?.remove(identity) ?: return false
@@ -92,15 +99,16 @@ class SlotInputRouter(
         return true
     }
 
-    /** One controller motion sample: sticks -1..1 (Y down positive, Android's convention), triggers 0..1, hat -1..1. */
-    fun motion(slot: Int, lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float, hatX: Float, hatY: Float) {
+    /** One controller motion sample: sticks -1..1 (Y down positive, Android's convention), triggers 0..1,
+     *  hat -1..1; [ltKey] and [rtKey] are the guest keys L2 and R2 are mapped to (null: unbound). */
+    fun motion(slot: Int, lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float, hatX: Float, hatY: Float,
+               ltKey: Int? = KC_TRIGGER_L, rtKey: Int? = KC_TRIGGER_R) {
         val pad = pad(slot)
         axisPair(slot, pad, lx, KC_LTHUMB_LEFT, KC_LTHUMB_RIGHT, invert = false)
         axisPair(slot, pad, ly, KC_LTHUMB_UP, KC_LTHUMB_DOWN, invert = true)
         axisPair(slot, pad, rx, KC_RTHUMB_LEFT, KC_RTHUMB_RIGHT, invert = false)
         axisPair(slot, pad, ry, KC_RTHUMB_UP, KC_RTHUMB_DOWN, invert = true)
-        held(slot, pad, KC_TRIGGER_L, lt > 0.5f)
-        held(slot, pad, KC_TRIGGER_R, rt > 0.5f)
+        for (out in pad.triggers.changes(AnalogTriggers.outputs(lt, rt, ltKey, rtKey))) send(slot, out.key, out.pressed, out.value)
         held(slot, pad, KC_DPAD_LEFT, hatX < -0.5f)
         held(slot, pad, KC_DPAD_RIGHT, hatX > 0.5f)
         held(slot, pad, KC_DPAD_UP, hatY < -0.5f)
@@ -113,6 +121,7 @@ class SlotInputRouter(
         pad.keys.values.forEach { send(slot, it, false, KEY_VALUE_UNUSED) }
         for (code in pad.axisPressed.indices) if (pad.axisPressed[code]) send(slot, code, false, 0)
         for (code in pad.held.indices) if (pad.held[code]) send(slot, code, false, KEY_VALUE_UNUSED)
+        for (out in pad.triggers.releaseAll()) send(slot, out.key, false, out.value)
     }
 
     fun releaseAll() = pads.keys.toList().forEach(::release)

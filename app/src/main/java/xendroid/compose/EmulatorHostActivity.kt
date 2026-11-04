@@ -164,8 +164,6 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val KC_START = 9
         private const val KC_SHOULDER_L = 10
         private const val KC_SHOULDER_R = 11
-        private const val KC_TRIGGER_L = 14
-        private const val KC_TRIGGER_R = 15
         private const val KC_LTHUMB_LEFT = 16
         private const val KC_LTHUMB_UP = 17
         private const val KC_LTHUMB_RIGHT = 18
@@ -234,6 +232,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
     /** Device id -> descriptor of each known controller (a removed device can no longer be asked). */
     private val controllerKeys = mutableMapOf<Int, String>()
+    /** #76: controllers that played with every player taken; they play as P1, as before. */
+    private val withoutSlot = HashSet<String>()
     /** I04/U08: guest rumble on physical controllers only (never the phone): each controller's own
      *  intensity (set in Test controllers), else the default the in-game menu changes. */
     private val rumbleSettings by lazy {
@@ -321,6 +321,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             if (deviceId == touchHiddenBy) touchControlsBack("the controller disconnected")
             // Release only what the lost controller held (I04); its player slot frees up.
             controllerKeys.remove(deviceId)?.let { key ->
+                withoutSlot.remove(key)
                 controllerSlots.disconnect(key)?.let { slot ->
                     if (slot == 0) releaseGuestInput() else {
                         slotInput.release(slot)
@@ -559,8 +560,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         GameButtons.DEFAULT_LOOKUP
 
     private var vibrator: Vibrator? = null
-    private var lTriggerDown = false
-    private var rTriggerDown = false
+    /** #97: (device id << 1 | side) of each trigger whose axis moved; its L2/R2 key then stays out of the guest. */
+    private val analogTriggers = HashSet<Long>()
+    /** #97: what P1's trigger axes last sent. */
+    private val triggerSent = xendroid.compose.gamepad.AnalogTriggers.Sent()
 
     /** 15l: the UI scale chosen in the library, for the in-game menu and panels (read per game). */
     private var uiScale = xendroid.compose.ui.theme.UiScale.DEFAULT
@@ -970,9 +973,39 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         controllers[deviceId] = id
         val key = device.descriptor ?: "device:$deviceId"
         controllerKeys[deviceId] = key
+        // #76: its player comes with its first input ([claimPlayer]).
+        recordEvent("controller", "$what ($id)")
+    }
+
+    /** #76: a controller takes a player when it first plays ([xendroid.compose.gamepad.PadPlay]),
+     *  the one it held before when still free, else the lowest free one. A device that never sends
+     *  input (a handheld's raw controls behind its own mapping service, listed next to the device
+     *  that sends them) takes none, so the controls that play are P1. Every player taken: it plays
+     *  as P1, as before. */
+    private fun claimPlayer(deviceId: Int) {
+        val key = controllerKeys[deviceId] ?: return
+        if (controllerSlots.slotOf(key) != null || key in withoutSlot) return
         val slot = controllerSlots.connect(key)
-        recordEvent("controller", "$what ($id) " + (slot?.let { "as P${it + 1}" } ?: "with no free player slot"))
+        if (slot == null) withoutSlot += key
+        recordEvent("controller", "${controllers[deviceId] ?: "a controller"} " +
+            (slot?.let { "plays as P${it + 1}" } ?: "plays with no free player slot"))
         if (slot != null && slot > 0) session.setSlotConnected(slot, true, "Controller ${slot + 1}")
+    }
+
+    /** A controller that hasn't played yet: nothing it sends is the game's (its sticks at rest
+     *  would release P1's). */
+    private fun isIdleController(deviceId: Int): Boolean {
+        val key = controllerKeys[deviceId] ?: return false
+        return controllerSlots.slotOf(key) == null && key !in withoutSlot
+    }
+
+    private fun playsMotion(event: MotionEvent): Boolean {
+        fun axis(a: Int) = event.getAxisValue(a)
+        return xendroid.compose.gamepad.PadPlay.plays(
+            axis(MotionEvent.AXIS_X), axis(MotionEvent.AXIS_Y), axis(MotionEvent.AXIS_Z), axis(MotionEvent.AXIS_RZ),
+            maxOf(axis(MotionEvent.AXIS_LTRIGGER), axis(MotionEvent.AXIS_BRAKE)),
+            maxOf(axis(MotionEvent.AXIS_RTRIGGER), axis(MotionEvent.AXIS_GAS)),
+            axis(MotionEvent.AXIS_HAT_X), axis(MotionEvent.AXIS_HAT_Y))
     }
 
     /** A press, or a push past half, from a physical controller: playing P1, it puts the
@@ -2364,7 +2397,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 && isControllerEvent(event) &&
-            event.keyCode != KeyEvent.KEYCODE_BACK) noteControllerUse(event)
+            event.keyCode != KeyEvent.KEYCODE_BACK) {
+            claimPlayer(event.deviceId)
+            noteControllerUse(event)
+        }
         // U10: a controller types on the grid; the focused text field must not eat its D-pad.
         if (keyboardRequestState.value != null && !editorOpen.value && isControllerEvent(event)) {
             return when (event.action) {
@@ -2457,6 +2493,9 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                         event
                     )
 
+        // #97: the axis of an analog trigger carries it, not its key.
+        if (isAnalogTriggerKey(event)) return true
+
         // P2-P4 controllers play their own slot (I03); P1 continues below unchanged.
         val player = playerSlot(event.deviceId)
         if (player > 0) {
@@ -2490,6 +2529,13 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (xendroid.compose.gamepad.MenuButtons.direction(keyCode) != 0) navRepeat.release()
         if (consumedMenuKeys.remove(identity)) return true
         val player = playerSlot(event.deviceId)
+        // #97: a press that came before the trigger's axis moved is the axis's now; its release
+        // would cut the trigger mid-travel.
+        if (isAnalogTriggerKey(event)) {
+            sentGuestKeys.remove(identity)
+            if (player > 0) slotInput.forget(player, identity)
+            return true
+        }
         if (player > 0 && slotInput.keyUp(player, identity)) return true
 
         sentGuestKeys.remove(identity)?.let { gameKey ->
@@ -2548,6 +2594,9 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK && playsMotion(event)) {
+            claimPlayer(event.deviceId)
+        }
         if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK &&
             xendroid.compose.gamepad.TouchOverlayPresence.pushed(
                 event.getAxisValue(MotionEvent.AXIS_X), event.getAxisValue(MotionEvent.AXIS_Y),
@@ -2567,6 +2616,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun onGenericMotion(
         event: MotionEvent
     ): Boolean {
+        if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK) noteAnalogTriggers(event)
         if (editorOpen.value && !hasGuestPrompt()) return super.onGenericMotionEvent(event)
         if (keyboardRequestState.value != null &&
             event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK) {
@@ -2582,6 +2632,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             return true
         }
 
+        // #76: a controller that hasn't played sends nothing to the game yet.
+        if (isIdleController(event.deviceId)) return true
         val player = playerSlot(event.deviceId)
         if (player > 0 && event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK) {
             // Same axes and rules as P1 below; a D-pad that also sends keys has no hat here.
@@ -2592,7 +2644,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)),
                 maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)),
                 if (hat) event.getAxisValue(MotionEvent.AXIS_HAT_X) else 0f,
-                if (hat) event.getAxisValue(MotionEvent.AXIS_HAT_Y) else 0f)
+                if (hat) event.getAxisValue(MotionEvent.AXIS_HAT_Y) else 0f,
+                keyMap[KeyEvent.KEYCODE_BUTTON_L2], keyMap[KeyEvent.KEYCODE_BUTTON_R2])
             return true
         }
 
@@ -2647,54 +2700,44 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             invert = true
         )
 
-        lTriggerDown =
-            emitTrigger(
-                maxOf(
-                    event.getAxisValue(
-                        MotionEvent.AXIS_LTRIGGER
-                    ),
-                    event.getAxisValue(
-                        MotionEvent.AXIS_BRAKE
-                    )
-                ),
-                KC_TRIGGER_L,
-                lTriggerDown
-            )
-
-        rTriggerDown =
-            emitTrigger(
-                maxOf(
-                    event.getAxisValue(
-                        MotionEvent.AXIS_RTRIGGER
-                    ),
-                    event.getAxisValue(
-                        MotionEvent.AXIS_GAS
-                    )
-                ),
-                KC_TRIGGER_R,
-                rTriggerDown
-            )
+        emitTriggers(
+            maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)),
+            maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)))
 
         return true
     }
 
-    private fun emitTrigger(
-        value: Float,
-        gameKey: Int,
-        wasDown: Boolean
-    ): Boolean {
-        val down =
-            value > 0.5f
-
-        if (down != wasDown) {
-            session.keyEvent(
-                gameKey,
-                down,
-                KEY_VALUE_UNUSED
-            )
+    /** #97: P1's trigger axes as [xendroid.compose.gamepad.AnalogTriggers]: the whole travel on the
+     *  guest's LT and RT (a threshold to a button lost the throttle and brake of racing games),
+     *  a press past half way on another button the mapping puts L2 or R2 on. */
+    private fun emitTriggers(lt: Float, rt: Float) {
+        for (out in triggerSent.changes(xendroid.compose.gamepad.AnalogTriggers.outputs(lt, rt,
+                keyMap[KeyEvent.KEYCODE_BUTTON_L2], keyMap[KeyEvent.KEYCODE_BUTTON_R2]))) {
+            session.keyEvent(out.key, out.pressed, out.value)
         }
+    }
 
-        return down
+    private fun noteAnalogTriggers(event: MotionEvent) {
+        val id = event.deviceId.toLong() shl 1
+        val deadzone = xendroid.compose.gamepad.AnalogTriggers.DEADZONE
+        if (maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)) > deadzone) {
+            analogTriggers += id
+        }
+        if (maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) > deadzone) {
+            analogTriggers += id or 1L
+        }
+    }
+
+    /** A pad that sends a trigger as an axis may also send its L2/R2 key past a point of its own:
+     *  once that axis has moved it carries the trigger, as a key arriving after the last motion
+     *  sample would leave the guest's trigger full. */
+    private fun isAnalogTriggerKey(event: KeyEvent): Boolean {
+        val side = when (event.keyCode) {
+            KeyEvent.KEYCODE_BUTTON_L2 -> 0L
+            KeyEvent.KEYCODE_BUTTON_R2 -> 1L
+            else -> return false
+        }
+        return ((event.deviceId.toLong() shl 1) or side) in analogTriggers
     }
 
     private fun emitAxisPair(
@@ -4059,10 +4102,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         for (code in KC_LTHUMB_LEFT..KC_RTHUMB_DOWN) {
             if (axisPressed[code]) emitAxis(code, false, 0)
         }
-        if (lTriggerDown) session.keyEvent(KC_TRIGGER_L, false, KEY_VALUE_UNUSED)
-        if (rTriggerDown) session.keyEvent(KC_TRIGGER_R, false, KEY_VALUE_UNUSED)
-        lTriggerDown = false
-        rTriggerDown = false
+        // The triggers, or the buttons the mapping puts them on (#97).
+        triggerSent.releaseAll().forEach { session.keyEvent(it.key, false, it.value) }
         if (hatLeft) session.keyEvent(KC_DPAD_LEFT, false, KEY_VALUE_UNUSED)
         if (hatRight) session.keyEvent(KC_DPAD_RIGHT, false, KEY_VALUE_UNUSED)
         if (hatUp) session.keyEvent(KC_DPAD_UP, false, KEY_VALUE_UNUSED)

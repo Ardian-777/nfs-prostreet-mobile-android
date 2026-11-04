@@ -14,7 +14,7 @@ The **Controls** area brings together who plays as P1 to P4, the touch options, 
 
 ## Who plays
 
-Controllers join as P1 to P4 in the order they connect. Without a physical controller, P1 uses the touch controls. Each player joins with the profile chosen in **Profiles → Who plays** (see [profiles](doc:interface#profiles-and-saves)).
+Controllers join as P1 to P4 in the order they are first used: a button press, or a stick, trigger or D-pad pushed past half way. Until then a controller takes no player and sends nothing to the game. Without a physical controller, P1 uses the touch controls. Each player joins with the profile chosen in **Profiles → Who plays** (see [profiles](doc:interface#profiles-and-saves)).
 
 ## Touch controls
 

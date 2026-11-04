@@ -23,7 +23,7 @@
     <string name="xd_ctl_tool_test">Test controllers</string>
     <string name="xd_ctl_tool_phone">Phone as controller</string>
     <string name="xd_ctl_who">Who plays now</string>
-    <string name="xd_ctl_who_order">in the order they connected</string>
+    <string name="xd_ctl_who_order">in the order they first press a button</string>
     <string name="xd_ctl_slot_touch">Touch controls</string>
     <string name="xd_ctl_slot_touch_sub">on this screen</string>
     <string name="xd_ctl_slot_free">Free</string>

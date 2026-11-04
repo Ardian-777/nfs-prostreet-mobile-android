@@ -108,6 +108,9 @@ class MainActivity : ComponentActivity() {
     // implementation class RestrictTo, but overriding the platform callback is valid.
     @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // #76: who has played, before any screen takes the event (the controller test does).
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+            event.keyCode != KeyEvent.KEYCODE_BACK) noteControllerUse(event)
         // U05: the controller test sees controllers raw and alone.
         if (xendroid.compose.gamepad.GamepadCapture.listener?.invoke(event) == true) return true
         // U04: A clicks and B goes back, or the other way round when the user swapped them.
@@ -130,8 +133,26 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (event.source and android.view.InputDevice.SOURCE_JOYSTICK == android.view.InputDevice.SOURCE_JOYSTICK) {
+            fun axis(a: Int) = event.getAxisValue(a)
+            val plays = xendroid.compose.gamepad.PadPlay.plays(
+                axis(android.view.MotionEvent.AXIS_X), axis(android.view.MotionEvent.AXIS_Y),
+                axis(android.view.MotionEvent.AXIS_Z), axis(android.view.MotionEvent.AXIS_RZ),
+                maxOf(axis(android.view.MotionEvent.AXIS_LTRIGGER), axis(android.view.MotionEvent.AXIS_BRAKE)),
+                maxOf(axis(android.view.MotionEvent.AXIS_RTRIGGER), axis(android.view.MotionEvent.AXIS_GAS)),
+                axis(android.view.MotionEvent.AXIS_HAT_X), axis(android.view.MotionEvent.AXIS_HAT_Y))
+            if (plays) noteControllerUse(event)
+        }
         if (xendroid.compose.gamepad.GamepadCapture.listener?.invoke(event) == true) return true
         return super.dispatchGenericMotionEvent(event)
+    }
+
+    /** #76: a controller that plays, in [xendroid.compose.gamepad.ControllerUse]'s order. */
+    private fun noteControllerUse(event: android.view.InputEvent) {
+        val device = event.device ?: return
+        if (xendroid.compose.ui.design.Gamepads.isController(device)) {
+            xendroid.compose.gamepad.ControllerUse.note(device.descriptor)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

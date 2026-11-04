@@ -58,6 +58,7 @@ import xendroid.compose.R
 import xendroid.compose.gamepad.ControlOptions
 import xendroid.compose.gamepad.ControlOptionsStore
 import xendroid.compose.gamepad.ControllerTestModel
+import xendroid.compose.gamepad.ControllerUse
 import xendroid.compose.gamepad.GamepadCapture
 import xendroid.compose.gamepad.PadAxes
 import xendroid.compose.gamepad.RumbleIntensity
@@ -190,7 +191,7 @@ fun ControllerTestScreen(
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             XdNote(stringResource(R.string.ct_intro), tone = NoteTone.INFO, icon = XdIcons.info)
             if (devices.isEmpty()) XdCard(Modifier.fillMaxWidth()) { Text(stringResource(R.string.ct_none), style = XdText.body, color = Xd.colors.fg) }
-            val slots = ControllerTestModel.playerSlots(devices)
+            val slots = ControllerTestModel.playerSlots(devices, ControllerUse.descriptors)
             devices.forEach { device ->
                 DeviceCard(device, slots[device.id], gyro[device.id], rumble, options.rumble, editing)
             }
@@ -255,7 +256,8 @@ private fun DeviceCard(device: TestedDevice, slot: Int?, gyro: FloatArray?, rumb
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("%04X:%04X · %s".format(device.vendor, device.product, device.sources.joinToString(", ")), style = XdText.mono.copy(fontSize = 11.sp), color = c.fg3)
             }
-            if (device.connected) XdBadge(slot?.let { stringResource(R.string.ct_plays_as, it + 1) } ?: stringResource(R.string.ct_no_slot),
+            if (device.connected) XdBadge(slot?.let { stringResource(R.string.ct_plays_as, it + 1) }
+                ?: stringResource(if (device.descriptor in ControllerUse.descriptors) R.string.ct_no_slot else R.string.ct_plays_on_press),
                 tone = if (slot != null) BadgeTone.ACCENT else BadgeTone.WARN)
         }
         BoxWithConstraints {

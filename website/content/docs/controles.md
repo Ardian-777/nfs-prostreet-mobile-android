@@ -13,7 +13,7 @@ A área **Controles** reúne quem joga como P1 a P4, as opções do toque, os co
 
 ## Quem joga
 
-Os controles entram como P1 a P4 na ordem em que conectam. Sem controle físico, o P1 usa os controles de toque. Cada jogador entra com o perfil escolhido em **Perfis → Quem joga** (veja [perfis](doc:interface#perfis-e-saves)).
+Os controles entram como P1 a P4 na ordem em que são usados: o primeiro botão apertado, ou um analógico, gatilho ou direcional empurrado além da metade. Até lá, o controle não ocupa jogador nem manda nada ao jogo. Sem controle físico, o P1 usa os controles de toque. Cada jogador entra com o perfil escolhido em **Perfis → Quem joga** (veja [perfis](doc:interface#perfis-e-saves)).
 
 ## Controles de toque
 

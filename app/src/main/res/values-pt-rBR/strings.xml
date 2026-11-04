@@ -632,7 +632,7 @@
     <string name="pt_not_removed">Não removido: %1$s</string>
     <string name="pt_yours">seu: %1$s</string>
     <string name="pt_load_failed">Não deu para carregar os patches</string>
-    <string name="ct_intro">Aperte todos os botões e mova todos os analógicos. O que você aperta aqui não chega a nenhum jogo. Segure B por um segundo, ou use Voltar, para sair.</string>
+    <string name="ct_intro">Aperte todos os botões e mova todos os analógicos. O que você aperta aqui não chega a nenhum jogo. Segure B por um segundo, ou use Voltar, para sair. Num jogo, os controles pegam os jogadores na ordem do primeiro botão apertado.</string>
     <string name="ct_none">Nenhum controle conectado. Pareie um por Bluetooth ou ligue pelo cabo.</string>
     <string name="ct_connections">Conexões</string>
     <string name="ct_src_gamepad">gamepad</string>
@@ -914,6 +914,7 @@
     <string name="tv_on">TV · %1$s · %2$s Hz</string>
     <string name="ct_plays_as">Num jogo aberto agora: P%1$d</string>
     <string name="ct_no_slot">Num jogo aberto agora: sem jogador livre (P1–P4 ocupados)</string>
+    <string name="ct_plays_on_press">Próximo jogador livre ao apertar</string>
     <string name="ge_camera_speed">Velocidade da câmera por toque: %1$d%%</string>
     <string name="ge_camera_area">Área da câmera por toque: %1$d%% da tela, à direita</string>
     <string name="lib_last_profile">Jogado por último como %1$s</string>
