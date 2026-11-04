@@ -15,6 +15,7 @@ export default {
   /** Caminho do site no domínio (ex.: /Xendroid-Plus/); usado pela página 404, que não pode usar links relativos. */
   basePath: (process.env.SITE_BASE_PATH || new URL(url).pathname).replace(/\/?$/, '/'),
   discord: 'https://discord.gg/AT8Bswv62',
+  support: 'https://buymeacoffee.com/phforner0',
   /** Seções da documentação, na ordem da barra lateral. */
   docSections: [
     { id: 'comecar', title: { en: 'Get started', pt: 'Começar' } },

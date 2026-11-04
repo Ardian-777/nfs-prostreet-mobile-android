@@ -314,6 +314,7 @@ ${measured(site, L)}
       <li><a href="${doc('historico')}">${icon('history', 20)}<span>${tx('What’s new and release history', 'Novidades e histórico')}<small>${tx('what changed in every version', 'o que mudou em cada versão, em português')}</small></span>${icon('arrowR', 16)}</a></li>
       <li><a href="${doc('compilar-e-contribuir')}">${icon('wrench', 20)}<span>${tx('Build and contribute', 'Compilar e contribuir')}<small>${tx('JDK 21, Android SDK and NDK, tests and CI', 'JDK 21, Android SDK e NDK, testes e CI')}</small></span>${icon('arrowR', 16)}</a></li>
       <li><a href="${site.config.discord}" rel="noopener">${icon('chat', 20)}<span>${tx('Community', 'Comunidade')}<small>${tx('chat on Discord', 'conversa no Discord')}</small></span>${icon('external', 16)}</a></li>
+      <li><a href="${site.config.support}" rel="noopener">${icon('heart', 20)}<span>${tx('Support the project', 'Apoie o projeto')}<small>${tx('voluntary, on Buy Me a Coffee', 'voluntário, no Buy Me a Coffee')}</small></span>${icon('external', 16)}</a></li>
     </ul>
   </div>
 </section>
