@@ -119,8 +119,11 @@ dword_result_t NtQueryInformationFile_entry(
     case XFileNetworkOpenInformation: {
       // Make sure we're working with up-to-date information, just in case the
       // file size has changed via something other than NtSetInfoFile
-      // (eg. seems NtWriteFile might extend the file in some cases)
-      file->entry()->update();
+      // (eg. seems NtWriteFile might extend the file in some cases). The host
+      // lookup can block on a slow drive.
+      kernel_state()->RunBlockingIo(
+          [&]() { file->entry()->update(); },
+          GuestScheduler::BlockingCallClass::kConcurrent);
 
       auto info = info_ptr.as<X_FILE_NETWORK_OPEN_INFORMATION*>();
       info->creation_time = file->entry()->create_timestamp();
@@ -218,19 +221,26 @@ dword_result_t NtSetInformationFile_entry(
         break;
       }
 
+      // The host calls can block on a slow drive.
       bool basic_result = true;
-      if (info->creation_time) {
-        basic_result &= file->entry()->SetCreateTimestamp(info->creation_time);
-      }
+      kernel_state()->RunBlockingIo(
+          [&]() {
+            if (info->creation_time) {
+              basic_result &=
+                  file->entry()->SetCreateTimestamp(info->creation_time);
+            }
 
-      if (info->last_access_time) {
-        basic_result &=
-            file->entry()->SetAccessTimestamp(info->last_access_time);
-      }
+            if (info->last_access_time) {
+              basic_result &=
+                  file->entry()->SetAccessTimestamp(info->last_access_time);
+            }
 
-      if (info->last_write_time) {
-        basic_result &= file->entry()->SetWriteTimestamp(info->last_write_time);
-      }
+            if (info->last_write_time) {
+              basic_result &=
+                  file->entry()->SetWriteTimestamp(info->last_write_time);
+            }
+          },
+          GuestScheduler::BlockingCallClass::kConcurrent);
       if (!basic_result) {
         result = X_STATUS_UNSUCCESSFUL;
       }
@@ -289,10 +299,18 @@ dword_result_t NtSetInformationFile_entry(
                        uint64_t(device->sectors_per_allocation_unit()) *
                            device->bytes_per_sector(),
                        false);
-      file->entry()->update();
-      if (allocation_size < file->entry()->size()) {
+      uint64_t file_size = 0;
+      kernel_state()->RunBlockingIo(
+          [&]() {
+            file->entry()->update();
+            file_size = file->entry()->size();
+          },
+          GuestScheduler::BlockingCallClass::kConcurrent);
+      if (allocation_size < file_size) {
         result = file->SetLength(allocation_size);
-        file->entry()->update();
+        kernel_state()->RunBlockingIo(
+            [&]() { file->entry()->update(); },
+            GuestScheduler::BlockingCallClass::kConcurrent);
       }
       break;
     }
@@ -301,7 +319,9 @@ dword_result_t NtSetInformationFile_entry(
       result = file->SetLength(info->end_of_file);
 
       // Update the files vfs::Entry information
-      file->entry()->update();
+      kernel_state()->RunBlockingIo(
+          [&]() { file->entry()->update(); },
+          GuestScheduler::BlockingCallClass::kConcurrent);
       break;
     }
     case XFileCompletionInformation: {
@@ -311,10 +331,13 @@ dword_result_t NtSetInformationFile_entry(
       auto key = uint32_t(info->key);
       auto port =
           kernel_state()->object_table()->LookupObject<XIOCompletion>(handle);
-      if (!port) {
+      // Only an async handle binds to a port. It binds once.
+      if (file->is_synchronous() || file->HasCompletionPort()) {
+        result = X_STATUS_INVALID_PARAMETER;
+      } else if (!port) {
         result = X_STATUS_INVALID_HANDLE;
-      } else {
-        file->RegisterIOCompletionPort(key, port);
+      } else if (!file->RegisterIOCompletionPort(key, port)) {
+        result = X_STATUS_INVALID_PARAMETER;
       }
       break;
     }

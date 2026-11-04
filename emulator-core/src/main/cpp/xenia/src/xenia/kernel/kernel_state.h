@@ -10,15 +10,19 @@
 #ifndef XENIA_KERNEL_KERNEL_STATE_H_
 #define XENIA_KERNEL_KERNEL_STATE_H_
 
+#include <atomic>
 #include <bitset>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <list>
+#include <mutex>
 #include <vector>
 
 #include "xenia/base/bit_map.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/export_resolver.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel.h"
 #include "xenia/kernel/smc.h"
 #include "xenia/kernel/util/kernel_fwd.h"
@@ -45,8 +49,6 @@ class Processor;
 
 namespace xe {
 namespace kernel {
-
-class GuestScheduler;
 
 constexpr fourcc_t kKernelSaveSignature = make_fourcc("KRNL");
 
@@ -189,6 +191,16 @@ class KernelState {
   xam::XamState* xam_state() const { return xam_state_.get(); }
 
   GuestScheduler* guest_scheduler() const { return guest_scheduler_.get(); }
+
+  // Wake boost for a completed file request, NT's IO_DISK_INCREMENT.
+  static constexpr uint32_t kIoDiskIncrement = 1;
+  // Runs |fn|, a blocking host call such as a file read or open, on an I/O
+  // worker while the calling fiber waits on an event its completion signals.
+  // Off a fiber or under the global lock it runs inline. With |alertable| a
+  // user APC ends one poll of the wait, which still lasts until |fn| is done.
+  void RunBlockingIo(const std::function<void()>& fn,
+                     GuestScheduler::BlockingCallClass call_class,
+                     bool alertable = false);
 
   SystemManagementController* smc() const { return smc_.get(); }
 
@@ -348,6 +360,29 @@ class KernelState {
   void EndDPCImpersonation(cpu::ppc::PPCContext* context,
                            DPCImpersonationScope& end_scope);
 
+  // Queues a KDPC with |arg1| and |arg2| as its system arguments, for an expiry
+  // that fires on a host thread: on its target processor's DPC thread if that
+  // has started, else on the dispatch thread. A KDPC already queued there is
+  // left as it is.
+  void QueueDpc(uint32_t dpc_ptr, uint32_t arg1, uint32_t arg2);
+  // Dequeues a KDPC QueueDpc queued if it hasn't started.
+  bool RemoveDpc(uint32_t dpc_ptr);
+
+  // Starts the scheduler thread that runs DPCs on guest processor |cpu|, if
+  // the guest scheduler runs and it hasn't started. Called from guest code,
+  // never from a host timer thread.
+  void StartProcessorDpcThread(uint8_t cpu);
+  // Queues a KDPC to run at DISPATCH_LEVEL on guest processor |cpu|, whose DPC
+  // thread has started. The scheduler runs that thread on the processor ahead
+  // of lower priority threads, standing in for the console's DPC interrupt.
+  // Returns false, leaving its arguments, if the DPC is already queued.
+  bool QueueProcessorDpc(uint8_t cpu, uint32_t dpc_ptr, uint32_t arg1,
+                         uint32_t arg2);
+  // Whether a KDPC waits in guest processor |cpu|'s DPC queue.
+  bool IsProcessorDpcQueued(uint8_t cpu, uint32_t dpc_ptr);
+  // Dequeues a KDPC QueueProcessorDpc queued if it hasn't run yet.
+  bool RemoveProcessorDpc(uint32_t dpc_ptr);
+
   void EmulateCPInterruptDPC(uint32_t interrupt_callback,
                              uint32_t interrupt_callback_data, uint32_t source,
                              uint32_t cpu);
@@ -357,6 +392,8 @@ class KernelState {
 
  private:
   void LoadKernelModule(object_ref<KernelModule> kernel_module);
+  object_ref<XEvent> AcquireIoEvent();
+  void ReleaseIoEvent(object_ref<XEvent> event);
   void InitializeProcess(X_KPROCESS* process, uint32_t type,
                          char priority_class, char default_priority,
                          char max_dynamic_priority);
@@ -386,6 +423,10 @@ class KernelState {
   vfs::VirtualFileSystem* file_system_;
   std::unique_ptr<xam::XamState> xam_state_;
   std::unique_ptr<GuestScheduler> guest_scheduler_;
+  // Pooled completion events for RunBlockingIo so a request creates no kernel
+  // object.
+  std::mutex io_event_lock_;
+  std::vector<object_ref<XEvent>> idle_io_events_;
   std::unique_ptr<SystemManagementController> smc_;
   std::unique_ptr<XmpVolumePatch> xmp_volume_patch_;
   std::unique_ptr<XConfig> xconfig_;
@@ -412,8 +453,24 @@ class KernelState {
   object_ref<XHostThread> dispatch_thread_;
   // Must be guarded by the global critical region.
   util::NativeList dpc_list_;
-  std::condition_variable_any dispatch_cond_;
+  // Guards the dispatch queue, which a timer expiry pushes to while a timer
+  // cancel holding the global lock can be waiting for it.
+  std::mutex dispatch_mutex_;
+  std::condition_variable dispatch_cond_;
   std::list<std::function<void()>> dispatch_queue_;
+  // KDPCs queued on the dispatch thread that haven't started.
+  std::vector<uint32_t> dispatch_dpcs_;
+
+  // DPCs queued to each guest processor and the thread that runs them there.
+  struct ProcessorDpcs {
+    std::mutex lock;
+    std::deque<uint32_t> queue;
+    object_ref<XEvent> event;
+    object_ref<XHostThread> thread;
+    std::atomic<bool> started{false};
+  };
+  ProcessorDpcs processor_dpcs_[6];
+  void RunProcessorDpcs(uint8_t cpu);
 
   uint32_t ke_timestamp_bundle_ptr_ = 0;
   std::unique_ptr<xe::threading::HighResolutionTimer> timestamp_timer_;

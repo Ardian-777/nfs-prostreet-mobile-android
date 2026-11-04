@@ -31,6 +31,11 @@ class NullDevice : public Device {
 
   bool is_read_only() const override { return false; }
 
+  bool supports_concurrent_io() const override { return true; }
+
+  // Raw partitions, served by the disk driver.
+  bool queues_all_requests() const override { return true; }
+
   const std::string& name() const override { return name_; }
   uint32_t attributes() const override { return 0; }
   uint32_t component_name_max_length() const override { return 40; }

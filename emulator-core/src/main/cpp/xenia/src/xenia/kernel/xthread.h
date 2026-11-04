@@ -412,10 +412,10 @@ class XThread : public XObject, public cpu::Thread {
   bool main_thread() const { return main_thread_; }
   bool is_running() const { return running_; }
 
-  // True for threads that run a host C++ routine (XHostThread) rather than
-  // guest PPC code. These always use a real host thread, never a cooperative
-  // fiber, since they run host loops/blocking and other code dereferences their
-  // thread().
+  // True for threads that run a host C++ routine (XHostThread) on a real host
+  // thread rather than a cooperative fiber, since they run host loops/blocking
+  // and other code dereferences their thread(). An XHostThread created on a
+  // fiber is not one.
   virtual bool is_host_thread() const { return false; }
 
   uint32_t thread_id() const { return thread_id_; }
@@ -444,6 +444,11 @@ class XThread : public XObject, public cpu::Thread {
   // cooperative scheduler's alertable waits to return USER_APC, the same way a
   // host alertable wait wakes on a queued APC.
   bool HasPendingUserApc();
+
+  // True while a user APC routine runs on this thread.
+  bool in_user_apc() const { return user_apc_depth_ != 0; }
+  void EnterUserApc() { ++user_apc_depth_; }
+  void LeaveUserApc() { --user_apc_depth_; }
 
   int32_t priority() const { return priority_; }
   int32_t QueryPriority();
@@ -598,7 +603,6 @@ class XThread : public XObject, public cpu::Thread {
     kMultiAll,
     kDelay,
     kFence,
-    kIoOffload,
   };
   // Records the wait shape for diagnostics. Extra handles beyond the array are
   // dropped; the count reported is the real one so truncation stays visible.
@@ -668,8 +672,14 @@ class XThread : public XObject, public cpu::Thread {
     // thread and no quantum is charged.
     bool repoll_preempt = false;
     bool has_run = false;  // diagnostic: dispatched at least once
-    bool forced_preempt_logged =
-        false;  // one forced-preempt warning per thread
+    // Raw host ticks when this thread was linked into a ready list, so a
+    // dispatch can measure how long it waited behind higher priorities.
+    uint64_t ready_since_tick = 0;
+    // Consecutive involuntary preemptions with no wait or voluntary yield in
+    // between. A spinning fiber has no other exit, so this separates one from
+    // a thread that is merely running long.
+    uint32_t unyielded_quanta = 0;
+    bool starved_out_logged = false;  // one starvation warning per thread
     // Set by an external Terminate, exits the fiber at its next
     // ExitIfTerminated check.
     std::atomic<bool> terminate_pending{false};
@@ -694,12 +704,15 @@ class XThread : public XObject, public cpu::Thread {
     XObject* wait_gate_objects[8] = {};
     uint8_t wait_gate_count = 0;
 
-    // Consecutive safepoints that declined to preempt because the guest was at
-    // IRQL >= 2. Bounds the defer so a guest spinning at DISPATCH_LEVEL on a
-    // co-resident holder cannot livelock its dispatch CPU forever.
+    // Safepoints since the last preemption that declined to preempt because the
+    // guest was at IRQL >= 2, as the console defers the dispatch. Bounds the
+    // defer only while guest CPUs share dispatch threads.
     uint32_t preempt_defers_irql = 0;
-    // Same, for holding the global critical region. Diagnostic only - yielding
-    // there would let a co-resident fiber re-enter the recursive lock.
+    // One forced-preemption warning per thread.
+    bool forced_preempt_logged = false;
+    // Consecutive safepoints that declined to preempt while holding the global
+    // critical region. Diagnostic only - yielding there would let a co-resident
+    // fiber re-enter the recursive lock.
     uint32_t preempt_defers_lock = 0;
 
     // guest_yield_sleep_us: NtYieldExecution calls that found nothing else to
@@ -766,6 +779,8 @@ class XThread : public XObject, public cpu::Thread {
   bool guest_thread_ = false;
   bool main_thread_ = false;  // Entry-point thread
   bool running_ = false;
+  // Nested, as a routine can itself wait alertably.
+  uint32_t user_apc_depth_ = 0;
 
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this
@@ -817,16 +832,19 @@ class XThread : public XObject, public cpu::Thread {
 
 class XHostThread : public XThread {
  public:
+  // |on_fiber| runs |host_fn| on a scheduler fiber instead, for a routine that
+  // only blocks in guest waits.
   XHostThread(KernelState* kernel_state, uint32_t stack_size,
               uint32_t creation_flags, std::function<int()> host_fn,
-              uint32_t guest_process = 0);
+              uint32_t guest_process = 0, bool on_fiber = false);
 
-  bool is_host_thread() const override { return true; }
+  bool is_host_thread() const override { return !on_fiber_; }
 
   void Execute() override;
 
  private:
   std::function<int()> host_fn_;
+  bool on_fiber_;
 };
 
 }  // namespace kernel

@@ -71,6 +71,7 @@
 #include "xenia/vfs/entry.h"
 #include "xenia/vfs/file.h"
 #include "xenia/vfs/virtual_file_system.h"
+#include "xenia/vfs/xex_metadata.h"
 
 #if XE_PLATFORM_xendroid
 #include "third_party/zarchive/include/zarchive/zarchivecommon.h"
@@ -513,26 +514,30 @@ X_STATUS Emulator::TerminateTitle() {
 
 const std::unique_ptr<vfs::Device> Emulator::CreateVfsDevice(
     const std::filesystem::path& path, const std::string_view mount_path) {
+  std::unique_ptr<vfs::Device> device;
   // Must check if the type has changed e.g. XamSwapDisc
   switch (GetFileSignature(path)) {
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
-      auto parent_path = path.parent_path();
-      return std::make_unique<vfs::HostPathDevice>(
-          mount_path, parent_path, !cvars::allow_game_relative_writes);
+      // An unpacked package's executable says where it came from, wherever
+      // the files now are.
+      auto xex = vfs::ExtractXexMetadata(path);
+      device = std::make_unique<vfs::HostPathDevice>(
+          mount_path, path.parent_path(), !cvars::allow_game_relative_writes,
+          false, xex && xex->RunsFromPackageOnly() ? "STFS" : "GDFX");
     } break;
     case FileSignatureType::LIVE:
     case FileSignatureType::CON:
     case FileSignatureType::PIRS: {
-      return vfs::XContentContainerDevice::CreateContentDevice(mount_path,
-                                                               path);
+      device =
+          vfs::XContentContainerDevice::CreateContentDevice(mount_path, path);
     } break;
     case FileSignatureType::XISO: {
-      return std::make_unique<vfs::DiscImageDevice>(mount_path, path);
+      device = std::make_unique<vfs::DiscImageDevice>(mount_path, path);
     } break;
     case FileSignatureType::ZAR: {
-      return std::make_unique<vfs::DiscZarchiveDevice>(mount_path, path);
+      device = std::make_unique<vfs::DiscZarchiveDevice>(mount_path, path);
     } break;
     case FileSignatureType::EXE:
     case FileSignatureType::Unknown:
@@ -540,6 +545,13 @@ const std::unique_ptr<vfs::Device> Emulator::CreateVfsDevice(
       return nullptr;
       break;
   }
+
+  // The launched title's own storage, and the only mount given request timing,
+  // since nothing streams content through the save, profile or cache mounts.
+  if (device) {
+    device->drive_timing().Configure();
+  }
+  return device;
 }
 
 uint64_t Emulator::GetPersistentEmulatorFlags() {

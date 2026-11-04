@@ -9,6 +9,8 @@
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 
+#include <algorithm>
+#include <utility>
 #include <vector>
 
 #include "xenia/base/atomic.h"
@@ -1254,8 +1256,8 @@ DECLARE_XBOXKRNL_EXPORT3(NtSignalAndWaitForSingleObjectEx, kThreading,
 
 static void PrefetchForCAS(const void* value) { swcache::PrefetchW(value); }
 
-// Brief spin budget for a spinlock held on another dispatch thread, roughly
-// the cost of the fiber reschedule it avoids.
+// Pauses between host yields while a spinlock is held on another dispatch
+// thread.
 static constexpr int kRemoteHolderSpinTries = 16;
 
 uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
@@ -1275,8 +1277,9 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
       !xe::atomic_cas(0, xe::byte_swap(our_pcr), &lock->prcb_of_owner.value)) {
     // Under the cooperative scheduler the holder may be a fiber queued behind
     // us on this dispatch thread, so it can only run if we yield the fiber. A
-    // holder running on another dispatch thread releases in nanoseconds, so
-    // spin briefly there before paying a reschedule.
+    // holder on another dispatch thread runs there. Like the console at
+    // DISPATCH_LEVEL, this spins until it releases and yields only the host
+    // thread.
     if (XThread::GetCurrentFiberThread()) {
       uint32_t owner_pcr_be = lock->prcb_of_owner.value;
       if (!owner_pcr_be) {
@@ -1285,17 +1288,19 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
       auto* owner_kpcr =
           ctx->TranslateVirtual<X_KPCR*>(xe::byte_swap(owner_pcr_be));
       auto* scheduler = ctx->kernel_state->guest_scheduler();
+      // Teardown needs the fiber back at its dispatch loop, which a holder
+      // stopped with its own dispatch thread would never allow.
       if (scheduler->DispatchCpuOf(owner_kpcr->prcb_data.current_cpu) !=
-          scheduler->DispatchCpuOf(our_cpu)) {
+              scheduler->DispatchCpuOf(our_cpu) &&
+          !scheduler->shutting_down()) {
         volatile uint32_t* owner_raw = &lock->prcb_of_owner.value;
         for (int i = 0; i < kRemoteHolderSpinTries && *owner_raw; ++i) {
           SpinPause();
         }
-        if (!*owner_raw) {
-          continue;
+        if (*owner_raw) {
+          xe::threading::MaybeYield();
         }
-        // Still held past the budget, e.g. a holder preempted mid-hold, so
-        // stop burning the slice.
+        continue;
       }
       GuestScheduler::SpinYield();
       continue;
@@ -1578,9 +1583,16 @@ static bool ProcessApcList(PPCContext* ctx, X_KTHREAD* current_thread,
     uint32_t arg2 = xe::load_and_swap<uint32_t>(scratch_ptr + 12);
 
     if (normal_routine) {
+      XThread* thread = list_index == 1 ? XThread::GetCurrentThread() : nullptr;
+      if (thread) {
+        thread->EnterUserApc();
+      }
       uint64_t normal_args[] = {normal_context, arg1, arg2};
       ctx->processor->Execute(ctx->thread_state, normal_routine, normal_args,
                               xe::countof(normal_args));
+      if (thread) {
+        thread->LeaveUserApc();
+      }
     }
 
     unlocked_irql = xeKeKfAcquireSpinLock(ctx, &current_thread->apc_lock);
@@ -1818,6 +1830,56 @@ void KeInitializeDpc_entry(pointer_t<XDPC> dpc, lpvoid_t routine,
 }
 DECLARE_XBOXKRNL_EXPORT2(KeInitializeDpc, kThreading, kImplemented, kSketchy);
 
+// DPCs queued while a DPC routine runs, with the guest thread running it, as
+// {thread id, DPC}. They run after it returns, as the console drains its DPC
+// queue, instead of nesting. Guarded with the global lock.
+static std::vector<std::pair<uint32_t, uint32_t>> deferred_dpcs;
+
+static bool IsDeferredDpc(uint32_t dpc_ptr) {
+  return std::find_if(deferred_dpcs.begin(), deferred_dpcs.end(),
+                      [dpc_ptr](const auto& deferred) {
+                        return deferred.second == dpc_ptr;
+                      }) != deferred_dpcs.end();
+}
+
+// Runs a DPC on the calling thread. One targeted at another processor
+// (desired_cpu_number n + 1 runs on CPU n) sees that processor's number.
+void xeRunDpc(PPCContext* ctx, uint32_t dpc_ptr, uint32_t arg1, uint32_t arg2) {
+  auto dpc = kernel_memory()->TranslateVirtual<XDPC*>(dpc_ptr);
+  if (!dpc->routine) {
+    return;
+  }
+  auto kpcr = ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13]);
+  const uint8_t own_cpu = kpcr->prcb_data.current_cpu;
+  uint64_t args[] = {dpc_ptr, uint32_t(dpc->context), arg1, arg2};
+  if (dpc->desired_cpu_number && dpc->desired_cpu_number <= 6) {
+    kpcr->prcb_data.current_cpu = dpc->desired_cpu_number - 1;
+  }
+  kernel_state()->processor()->Execute(ctx->thread_state, dpc->routine, args,
+                                       xe::countof(args));
+  kpcr->prcb_data.current_cpu = own_cpu;
+}
+
+void xeRunDeferredDpcs(PPCContext* ctx) {
+  while (true) {
+    uint32_t dpc_ptr;
+    {
+      auto global_lock = xe::global_critical_region::AcquireDirect();
+      auto it = std::find_if(deferred_dpcs.begin(), deferred_dpcs.end(),
+                             [ctx](const auto& deferred) {
+                               return deferred.first == ctx->thread_id;
+                             });
+      if (it == deferred_dpcs.end()) {
+        return;
+      }
+      dpc_ptr = it->second;
+      deferred_dpcs.erase(it);
+    }
+    auto dpc = kernel_memory()->TranslateVirtual<XDPC*>(dpc_ptr);
+    xeRunDpc(ctx, dpc_ptr, dpc->arg1, dpc->arg2);
+  }
+}
+
 dword_result_t KeInsertQueueDpc_entry(pointer_t<XDPC> dpc, dword_t arg1,
                                       dword_t arg2) {
   uint32_t list_entry_ptr = dpc.guest_address() + 4;
@@ -1826,43 +1888,61 @@ dword_result_t KeInsertQueueDpc_entry(pointer_t<XDPC> dpc, dword_t arg1,
   auto global_lock = xe::global_critical_region::AcquireDirect();
   auto dpc_list = kernel_state()->dpc_list();
 
+  // A DPC still waiting to run is not queued again.
+  if (IsDeferredDpc(dpc.guest_address())) {
+    return 0;
+  }
+
+  // A DPC targeted at another processor runs there, interrupting whatever runs
+  // on it below DISPATCH_LEVEL. Only a fiber pinned to that processor can
+  // stand in for it.
+  auto thread = XThread::GetCurrentThread();
+  const uint8_t desired_cpu = dpc->desired_cpu_number;
+  if (dpc->routine && thread && desired_cpu && desired_cpu <= 6 &&
+      GuestScheduler::enabled()) {
+    auto ppc_context = thread->thread_state()->context();
+    auto kpcr = ppc_context->TranslateVirtualGPR<X_KPCR*>(ppc_context->r[13]);
+    if (desired_cpu - 1 != kpcr->prcb_data.current_cpu ||
+        !XThread::GetCurrentFiberThread()) {
+      kernel_state()->StartProcessorDpcThread(desired_cpu - 1);
+      return kernel_state()->QueueProcessorDpc(desired_cpu - 1,
+                                               dpc.guest_address(), arg1, arg2)
+                 ? 1
+                 : 0;
+    }
+    if (kernel_state()->IsProcessorDpcQueued(desired_cpu - 1,
+                                             dpc.guest_address())) {
+      return 0;
+    }
+  }
+
   // Prep DPC.
   dpc->arg1 = (uint32_t)arg1;
   dpc->arg2 = (uint32_t)arg2;
 
   dpc_list->Insert(list_entry_ptr);
 
-  // Dispatch the DPC inline on the calling thread.  On real hardware DPCs
-  // are deferred to DISPATCH_IRQL on the target processor, but DPC routines
-  // access per-CPU state via r13 (KPCR) so they must run on a thread whose
-  // KPCR is valid for the target CPU.  The calling thread's KPCR satisfies
-  // this for the common case (desired_cpu_number == 0, meaning current CPU).
-  // Inline dispatch also avoids latency issues with shared work queues.
+  // Otherwise it runs inline on the calling thread: it targets the calling
+  // processor, or no scheduler can run it elsewhere.
   uint32_t routine = dpc->routine;
   if (routine) {
-    auto thread = XThread::GetCurrentThread();
     if (thread) {
       auto thread_state = thread->thread_state();
       auto ppc_context = thread_state->context();
       auto kpcr = ppc_context->TranslateVirtualGPR<X_KPCR*>(ppc_context->r[13]);
 
-      // If we're already inside a DPC (reentrant KeInsertQueueDpc from a DPC
-      // routine), skip the impersonation — we're already at DISPATCH_IRQL.
-      bool already_in_dpc = kpcr->prcb_data.dpc_active != 0;
+      // Inside a DPC routine (reentrant KeInsertQueueDpc), the DPC waits
+      // for the running one to return. A routine that queues itself again
+      // would otherwise recurse until the host stack overflows.
+      if (kpcr->prcb_data.dpc_active) {
+        deferred_dpcs.emplace_back(ppc_context->thread_id, dpc.guest_address());
+        return 1;
+      }
 
       DPCImpersonationScope dpc_scope{};
-      if (!already_in_dpc) {
-        kernel_state()->BeginDPCImpersonation(ppc_context, dpc_scope);
-      }
-
-      uint64_t args[] = {dpc.guest_address(), (uint64_t)dpc->context,
-                         (uint64_t)arg1, (uint64_t)arg2};
-      kernel_state()->processor()->Execute(thread_state, routine, args,
-                                           xe::countof(args));
-
-      if (!already_in_dpc) {
-        kernel_state()->EndDPCImpersonation(ppc_context, dpc_scope);
-      }
+      kernel_state()->BeginDPCImpersonation(ppc_context, dpc_scope);
+      xeRunDpc(ppc_context, dpc.guest_address(), arg1, arg2);
+      kernel_state()->EndDPCImpersonation(ppc_context, dpc_scope);
     }
   }
 
@@ -1880,6 +1960,19 @@ dword_result_t KeRemoveQueueDpc_entry(pointer_t<XDPC> dpc) {
   if (dpc_list->IsQueued(list_entry_ptr)) {
     dpc_list->Remove(list_entry_ptr);
     result = true;
+  }
+  if (kernel_state()->RemoveDpc(dpc.guest_address())) {
+    result = true;
+  }
+  if (kernel_state()->RemoveProcessorDpc(dpc.guest_address())) {
+    result = true;
+  }
+  for (auto it = deferred_dpcs.begin(); it != deferred_dpcs.end(); ++it) {
+    if (it->second == dpc.guest_address()) {
+      deferred_dpcs.erase(it);
+      result = true;
+      break;
+    }
   }
 
   return result ? 1 : 0;
@@ -2149,6 +2242,46 @@ void KeInitializeTimerEx_entry(pointer_t<X_KTIMER> timer, dword_t type,
   xeKeInitializeTimerEx(timer, type, proctype & 0xFF, context);
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeTimerEx, kThreading, kImplemented);
+
+// Returns whether the timer was already set.
+dword_result_t KeSetTimerEx_entry(pointer_t<X_KTIMER> timer, qword_t due_time,
+                                  dword_t period_ms, pointer_t<XDPC> dpc) {
+  auto native = XObject::GetNativeObject<XTimer>(kernel_state(), timer);
+  if (!native) {
+    return 0;
+  }
+  // Cancelled first, so an expiry of the previous setting can't overwrite the
+  // new one.
+  native->Cancel();
+  // Its expiry queues a DPC targeted at a processor on that processor's DPC
+  // thread, which only guest code can start.
+  if (dpc && dpc->desired_cpu_number && dpc->desired_cpu_number <= 6) {
+    kernel_state()->StartProcessorDpcThread(dpc->desired_cpu_number - 1);
+  }
+  const uint32_t was_set = timer->header.inserted;
+  timer->header.inserted = 1;
+  timer->header.signal_state = 0;
+  timer->due_time = uint64_t(due_time);
+  timer->period = uint32_t(period_ms);
+  timer->dpc = dpc.guest_address();
+  native->SetTimer(int64_t(uint64_t(due_time)), period_ms, 0, 0, false,
+                   dpc.guest_address());
+  return was_set;
+}
+DECLARE_XBOXKRNL_EXPORT1(KeSetTimerEx, kThreading, kImplemented);
+
+// Returns whether the timer was set.
+dword_result_t KeCancelTimer_entry(pointer_t<X_KTIMER> timer) {
+  const uint32_t was_set = timer->header.inserted;
+  if (was_set) {
+    if (auto native = XObject::GetNativeObject<XTimer>(kernel_state(), timer)) {
+      native->Cancel();
+    }
+  }
+  timer->header.inserted = 0;
+  return was_set;
+}
+DECLARE_XBOXKRNL_EXPORT1(KeCancelTimer, kThreading, kImplemented);
 
 }  // namespace xboxkrnl
 }  // namespace kernel

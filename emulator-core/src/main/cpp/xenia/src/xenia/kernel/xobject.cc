@@ -29,6 +29,7 @@
 #include "xenia/kernel/xsemaphore.h"
 #include "xenia/kernel/xsymboliclink.h"
 #include "xenia/kernel/xthread.h"
+#include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -251,11 +252,14 @@ void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
 // the single object waited on, null for a multi-wait. |self| is the waiting
 // fiber, resolved by the caller before the first yield: a thread_local read
 // after one resolves against the dispatch thread the fiber entered on, which
-// by then may be running another fiber or none.
+// by then may be running another fiber or none. |poll| is told whether the
+// waiter has blocked, as only a thread taken out of a wait is boosted.
 template <typename PollFn>
 X_STATUS CooperativeWait(GuestScheduler* scheduler, XThread* self,
                          X_KTHREAD* kthread, XObject* wait_object,
-                         bool alertable, uint64_t deadline_ms, PollFn&& poll) {
+                         bool alertable, uint64_t deadline_ms, PollFn&& poll,
+                         bool interruptible = true) {
+  bool parked = false;
   while (true) {
     // Alertable waits return on a queued user APC (the cooperative equivalent
     // of a host alertable-wait wake), then the caller runs xeProcessUserApcs.
@@ -274,7 +278,7 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, XThread* self,
     } else if (self) {
       wait_epoch = self->cooperative_wait_set_epoch();
     }
-    std::optional<X_STATUS> resolved = poll();
+    std::optional<X_STATUS> resolved = poll(parked);
     if (resolved) {
       WaitExit(self, kthread, *resolved);
       return *resolved;
@@ -283,7 +287,9 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, XThread* self,
       WaitExit(self, kthread, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
     }
-    scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable);
+    scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable,
+                                  interruptible);
+    parked = true;
   }
 }
 
@@ -356,11 +362,6 @@ bool CooperativeWaiterFifo::HasWaiters() {
   return !waiters_.empty();
 }
 
-XThread* CooperativeWaiterFifo::Front() {
-  std::lock_guard<std::mutex> lock(lock_);
-  return waiters_.empty() ? nullptr : waiters_.front();
-}
-
 namespace {
 // Signal ring. Small, lock-guarded and write-mostly: it is touched once per
 // cooperative wake, which is rare next to the poll traffic it helps explain.
@@ -371,11 +372,16 @@ uint64_t g_signal_ring_seq = 0;
 }  // namespace
 
 void XObject::RecordCooperativeSignal(XObject* object) {
+  if (object->signal_ring_quiet_) {
+    return;
+  }
   SignalRecord rec = {};
-  rec.handle = object->handle();
+  // A signal can trail the handle's removal.
+  rec.handle = object->handles().empty() ? 0 : object->handle();
   rec.type = static_cast<uint8_t>(object->type());
   rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
-  if (auto* thread = XThread::GetCurrentThread()) {
+  if (XThread::IsInThread()) {
+    auto* thread = XThread::GetCurrentThread();
     rec.signaler_thread = thread->handle();
     if (auto* state = thread->thread_state()) {
       rec.signaler_lr = uint32_t(state->context()->lr);
@@ -411,7 +417,7 @@ void XObject::WakeCooperativeWaiters() {
   // and the resulting empty scheduling passes). Every watcher's CPU is woken,
   // not just the permit FIFO front's, which loses the wake whenever that
   // waiter leaves between the signal and its dispatch.
-  kernel_state()->guest_scheduler()->WakeForSignal(this, nullptr);
+  kernel_state()->guest_scheduler()->WakeForSignal(this);
 }
 
 void XObject::EnterCooperativeWait(XThread* thread) {
@@ -450,7 +456,8 @@ xe::threading::WaitHandle* XObject::GetWaitHandleForCurrentThread(size_t slot) {
 }
 
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
-                       uint32_t alertable, uint64_t* opt_timeout) {
+                       uint32_t alertable, uint64_t* opt_timeout,
+                       bool interruptible) {
   auto wait_handle = GetWaitHandleForCurrentThread(0);
   if (!wait_handle) {
     // Object doesn't support waiting.
@@ -472,12 +479,12 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
     EnterCooperativeWait(self);  // FIFO fairness for semaphores
     if (self) {
       const uint32_t wait_handle_id = handle();
-      self->set_cooperative_wait_shape(
-          XThread::CooperativeWaitKind::kSingle, &wait_handle_id, 1);
+      self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kSingle,
+                                       &wait_handle_id, 1);
     }
     X_STATUS status = CooperativeWait(
         scheduler, self, kthread, this, alertable != 0, deadline_ms,
-        [&]() -> std::optional<X_STATUS> {
+        [&](bool parked) -> std::optional<X_STATUS> {
           // Released by a pulse that already reset the host primitive.
           if (cooperative_pulse_epoch() != entry_pulse_epoch) {
             if (self) {
@@ -494,7 +501,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                                           std::chrono::milliseconds(0));
           switch (poll) {
             case xe::threading::WaitResult::kSuccess: {
-              if (self) {
+              if (self && parked) {
                 self->BoostOnWake(priority_increment());
               }
               WaitCallback();
@@ -509,7 +516,8 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
             case xe::threading::WaitResult::kFailed:
               return X_STATUS_ABANDONED_WAIT_0;
           }
-        });
+        },
+        interruptible);
     LeaveCooperativeWait(self);
     return status;
   }
@@ -593,7 +601,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
     }
     X_STATUS status = CooperativeWait(
         scheduler, self, kthread, wait_object, alertable != 0, deadline_ms,
-        [&]() -> std::optional<X_STATUS> {
+        [&](bool parked) -> std::optional<X_STATUS> {
           // Released by a pulse that already reset the host primitive.
           if (wait_object->cooperative_pulse_epoch() != entry_pulse_epoch) {
             if (self) {
@@ -611,7 +619,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
               alertable ? true : false, std::chrono::milliseconds(0));
           switch (poll) {
             case xe::threading::WaitResult::kSuccess: {
-              if (self) {
+              if (self && parked) {
                 self->BoostOnWake(wait_object->priority_increment());
               }
               wait_object->WaitCallback();
@@ -733,7 +741,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
     }
     return CooperativeWait(
         scheduler, self, kthread, nullptr, alertable != 0, deadline_ms,
-        [&]() -> std::optional<X_STATUS> {
+        [&](bool parked) -> std::optional<X_STATUS> {
           resolve_handles();
           if (wait_type) {
             // WaitAny only: WaitAll needs every object signaled at once, which
@@ -756,7 +764,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
             switch (r.first) {
               case xe::threading::WaitResult::kSuccess: {
                 objects[r.second]->WaitCallback();
-                if (self) {
+                if (self && parked) {
                   self->BoostOnWake(objects[r.second]->priority_increment());
                 }
                 X_STATUS status = objects[r.second]->AcquireStatus();
@@ -791,7 +799,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                   boost_increment = objects[i]->priority_increment();
                 }
               }
-              if (self) {
+              if (self && parked) {
                 self->BoostOnWake(boost_increment);
               }
               return status;
@@ -1009,12 +1017,16 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
         assert_true(success);
         result = sem;
       } break;
+      case 8:    // TimerNotificationObject
+      case 9: {  // TimerSynchronizationObject
+        auto timer = new XTimer(kernel_state, true);
+        timer->InitializeNative(native_ptr, header);
+        result = timer;
+      } break;
       case 3:   // ProcessObject
       case 4:   // QueueObject
       case 6:   // ThreadObject
       case 7:   // GateObject
-      case 8:   // TimerNotificationObject
-      case 9:   // TimerSynchronizationObject
       case 18:  // ApcObject
       case 19:  // DpcObject
       case 20:  // DeviceQueueObject

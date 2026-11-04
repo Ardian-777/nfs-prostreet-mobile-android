@@ -470,8 +470,9 @@ X_STATUS XThread::Create() {
     // multiplexes onto its dispatch host thread instead of its own host OS
     // thread. The scheduler binds our TLS (SetCurrentThread) before switching
     // to this fiber, so the entry doesn't repeat it. Host-routine threads
-    // (XHostThread) stay real host threads, since they run host loops and
-    // blocking calls and their thread() is used elsewhere.
+    // (XHostThread) stay real host threads unless created on a fiber, since
+    // they run host loops and blocking calls and their thread() is used
+    // elsewhere.
     fiber_exit_event_ = xe::threading::Event::CreateManualResetEvent(false);
     xe::threading::Fiber::CreationParameters fiber_params;
     fiber_params.stack_size = 16_MiB;
@@ -849,6 +850,8 @@ void XThread::Reenter(uint32_t address) {
   // Called when the game switches fiber stacks (e.g., via
   // KeSetCurrentStackPointers in games like Forza Horizon 2).
   // Must unwind through all frames between here and Execute().
+  // No user APC routine frame survives the unwind.
+  user_apc_depth_ = 0;
 #if !XE_PLATFORM_WIN32
   if (cvars::fiber_reentry_longjmp && !fiber_ && reentry_armed_ &&
       !reentry_nested_guest_depth_) {
@@ -1134,7 +1137,8 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
   const uint8_t previous_cpu = pcr.prcb_data.current_cpu;
   pcr.prcb_data.current_cpu = cpu_index;
 
-  if (is_guest_thread()) {
+  // The scheduler pins a fiber by KTHREAD current_cpu.
+  if (is_guest_thread() || fiber_) {
     X_KTHREAD& thread_object =
         *memory()->TranslateVirtual<X_KTHREAD*>(guest_object());
     thread_object.current_cpu = cpu_index;
@@ -1613,10 +1617,11 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
 
 XHostThread::XHostThread(KernelState* kernel_state, uint32_t stack_size,
                          uint32_t creation_flags, std::function<int()> host_fn,
-                         uint32_t guest_process)
+                         uint32_t guest_process, bool on_fiber)
     : XThread(kernel_state, stack_size, 0, 0, 0, creation_flags, false, false,
               guest_process),
-      host_fn_(host_fn) {
+      host_fn_(host_fn),
+      on_fiber_(on_fiber) {
   // By default host threads are not debugger suspendable. If the thread runs
   // any guest code this must be overridden.
   can_debugger_suspend_ = false;
@@ -1625,7 +1630,7 @@ XHostThread::XHostThread(KernelState* kernel_state, uint32_t stack_size,
 void XHostThread::Execute() {
   XELOGD(
       "XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)",
-      thread_id_, handle(), thread_name_, thread_->system_id());
+      thread_id_, handle(), thread_name_, thread_ ? thread_->system_id() : 0);
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);
   int ret = host_fn_();

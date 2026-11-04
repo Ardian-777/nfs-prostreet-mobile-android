@@ -50,8 +50,8 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
 
   auto fs = kernel_state_->file_system();
   if (std::filesystem::is_directory(mount_path)) {
-    auto device = std::make_unique<vfs::HostPathDevice>(device_path_,
-                                                        mount_path, false);
+    auto device = std::make_unique<vfs::HostPathDevice>(
+        device_path_, mount_path, false, false, "STFS");
     mounted_ = device->Initialize();
     fs->RegisterDevice(std::move(device));
   } else {
@@ -565,8 +565,11 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
     std::error_code ec;
     if (!ResolvePackagePath(xuid, data, save_path, disc_number) &&
         std::filesystem::is_regular_file(save_path, ec)) {
-      kernel_state_->guest_scheduler()->RunBlockingHostCall(
-          [this, &save_path]() { UnpackPackageFile(save_path); });
+      // On a device of its own over the package, so not behind the title's
+      // reads on the serial worker.
+      kernel_state_->RunBlockingIo(
+          [this, &save_path]() { UnpackPackageFile(save_path); },
+          GuestScheduler::BlockingCallClass::kConcurrent);
     }
   }
 
