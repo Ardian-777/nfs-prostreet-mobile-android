@@ -4,7 +4,7 @@
 
 Object.assign(NOTES, {
   ctlhub: ['app', 'Controles é uma área do app: toque, controles físicos, vibração e giroscópio e telefones, com as ferramentas de mapeamento, editor de toque, teste e celular como controle.'],
-  slots: ['app', 'Quem joga como P1 a P4, na ordem em que os controles conectaram. Sem controle, o P1 são os controles de toque.'],
+  slots: ['app', 'Quem joga como P1 a P4, na ordem do primeiro botão apertado. Sem controle, o P1 são os controles de toque.'],
   touchone: ['app', 'Um interruptor só para os controles de toque; um jogo pode mudar isso na própria ficha.'],
   touchglob: ['app', 'Os ajustes gerais do toque valem para o controle inteiro: visual, opacidade, esconder sozinho, vibração ao tocar, tela dividida, deslizar o dedo e câmera por toque.'],
   layouts: ['app', 'Layouts salvos (até 30, nome com até 40 caracteres): aplicar com a prévia do que muda, exportar, importar um arquivo conferido (até 256 KB) e apagar.'],
@@ -92,7 +92,7 @@ function ctlOverviewHTML(v) {
     ? `<button class="crow" data-act="go" data-v="${go}" data-k="${k}"><span class="t"><b>${t}</b><small>${s}</small></span>${ic('chevR', 18)}</button>`
     : `<button class="tile" data-act="go" data-v="${go}" data-k="${k}">${ic(icon, 24)}<b>${t}</b><small>${s}</small></button>`;
   return `<div class="stack" data-note="ctlhub">
-    <section class="card" data-note="slots"><h3>${ic('gamepad', 15)} Quem joga agora<span class="r">na ordem em que conectaram</span></h3>
+    <section class="card" data-note="slots"><h3>${ic('gamepad', 15)} Quem joga agora<span class="r">na ordem do primeiro botão apertado</span></h3>
       <div class="slots">${slots.map((p, i) => p ? `<div class="slot"><span class="p">P${i + 1}</span><b>${esc(p.name)}</b><small>${p.conn} · vibração ${RUMBLE_T[padRumble(p)].toLowerCase()}</small></div>` : `<div class="slot free"><span class="p">P${i + 1}</span><b>Livre</b><small>${i === 2 ? 'Outro controle ou um telefone' : 'Livre'}</small></div>`).join('')}</div>
       <p class="note">Os controles de toque são do P1 e ${globalOf('@touch.hidepad') ? 'somem enquanto um controle físico joga como P1' : 'continuam na tela mesmo com um controle físico'}.</p></section>
     <div class="${v === 'c' ? 'c-rows' : 'tiles'}">
@@ -441,7 +441,7 @@ screen('padtest', {
   render() {
     const devs = ptDevices();
     const body = () => `<div class="stack">
-      <div class="pt-intro" data-note="ptleave"><span data-note="ptsim"></span>${ic('info', 18)}<p class="note">Aperte todos os botões e mova todos os analógicos. O que você aperta aqui não chega a nenhum jogo. Segure B por um segundo, ou use Voltar, para sair.</p></div>
+      <div class="pt-intro" data-note="ptleave"><span data-note="ptsim"></span>${ic('info', 18)}<p class="note">Aperte todos os botões e mova todos os analógicos. O que você aperta aqui não chega a nenhum jogo. Segure B por um segundo, ou use Voltar, para sair. Num jogo, os controles pegam os jogadores na ordem do primeiro botão apertado.</p></div>
       ${devs.length ? devs.map(ptCardHTML).join('') : `<section class="card"><p style="font-size:14px">${PT.src === 'real' ? 'Nenhum controle visto pelo navegador. Conecte um e aperte um botão.' : 'Nenhum controle conectado. Pareie um por Bluetooth ou ligue pelo cabo.'}</p></section>`}
       ${PT.src === 'demo' ? `<section class="card"><h3>${ic('timeline', 15)} Conexões</h3><ul class="pt-ev">${PAD_EVENTS.map(([n, k]) => `<li>${esc(n)}: ${k}</li>`).join('')}</ul></section>` : ''}
     </div>`;
