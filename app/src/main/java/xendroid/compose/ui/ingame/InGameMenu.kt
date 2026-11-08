@@ -627,6 +627,7 @@ internal fun InGameAction.title(): String = stringResource(
         InGameAction.EXTERNAL_DISPLAY -> R.string.menu_t_tv
         InGameAction.TV_MARGIN -> R.string.menu_tv_margin_title
         InGameAction.DRIVER_INFO -> R.string.menu_group_driver
+        InGameAction.ZEROFG -> R.string.menu_t_zerofg
         InGameAction.WINFG -> R.string.menu_t_winfg
         InGameAction.WINFG_PRESET -> R.string.menu_t_winfg_preset
         InGameAction.LSFG -> R.string.menu_t_lsfg

@@ -50,7 +50,7 @@ data class ImageTuning(val antialiasing: Int = -1, val sharpness: Int = -1, val 
         fun scalingValue(effect: Int): String? = EFFECTS.getOrNull(effect)
 
         /** The core's scaling effects in the menu's order (Presenter's Effect). */
-        val EFFECTS = listOf("bilinear", "cas", "fsr", "sgsr", "lanczos", "crt")
+        val EFFECTS = listOf("bilinear", "cas", "fsr", "sgsr", "lanczos", "crt", "sgsr_edge")
         private val AA = listOf("none", "fxaa", "fxaa_extreme")
         private val CAS = listOf("0.0", "0.25", "0.5", "0.75", "1.0")
         private val FSR = listOf("2.0", "1.0", "0.5", "0.2", "0.0")

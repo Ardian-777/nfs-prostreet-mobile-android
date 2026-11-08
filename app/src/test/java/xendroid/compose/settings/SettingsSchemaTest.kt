@@ -16,10 +16,11 @@ class SettingsSchemaTest {
     // 146 before the redesign, plus the 29 cvars of the core it shows now (docs/ui-redesign/README.md),
     // less APU|mute and GPU|readback_memexport, which the core never defined (ajustes-2.md).
     // Display|host_present_from_non_ui_thread is intentionally absent (forced true natively).
-    @Test fun total_entry_count_is_173() {
-        assertEquals(173, all.size)
+    // Plus adds Vulkan|zerofg_mode, in its own ZeroFG section: 174.
+    @Test fun total_entry_count_is_174() {
+        assertEquals(174, all.size)
         assertEquals(
-            173,
+            174,
             all.count { it is Setting.Bool } + all.count { it is Setting.IntRange } +
                 all.count { it is Setting.ListChoice } + all.count { it is Setting.Action } + all.count { it is Setting.Text },
         )
@@ -28,7 +29,7 @@ class SettingsSchemaTest {
     @Test fun counts_by_type_match_verified_inventory() {
         assertEquals(119, all.count { it is Setting.Bool })        // 103 + 18 new - 2 the core never had
         assertEquals(20, all.count { it is Setting.IntRange })     // 14 + 6 new
-        assertEquals(30, all.count { it is Setting.ListChoice })   // 27 + 3 new
+        assertEquals(31, all.count { it is Setting.ListChoice })   // 27 + 3 new + zerofg_mode
         assertEquals(2, all.count { it is Setting.Action })
         assertEquals(2, all.count { it is Setting.Text })          // launch_module, cl
     }
@@ -84,7 +85,7 @@ class SettingsSchemaTest {
 
     @Test fun categories_present_in_legacy_order() {
         val expected = listOf(
-            "Vulkan", "Video", "UI", "Storage", "Kernel", "Controller", "HID", "Memory", "XConfig",
+            "ZeroFG", "Vulkan", "Video", "UI", "Storage", "Kernel", "Controller", "HID", "Memory", "XConfig",
             "Display", "GPU", "CPU", "Logging", "Content", "General", "APU",
         )
         assertEquals(expected, SettingsSchema.categories.map { it.title })
@@ -171,7 +172,7 @@ class SettingsSchemaTest {
      *  reduces banding reachable without Developer mode. */
     @Test fun scaling_offers_the_core_effects_and_players_can_reduce_banding() {
         val s = SettingsSchema.byKey["Display|postprocess_scaling_and_sharpening"] as Setting.ListChoice
-        assertEquals(listOf("bilinear", "cas", "fsr", "sgsr", "lanczos", "crt"), s.options.map { it.value })
+        assertEquals(listOf("bilinear", "cas", "fsr", "sgsr", "lanczos", "crt", "sgsr_edge"), s.options.map { it.value })
         assertTrue("Display|postprocess_dither" in SettingsSchema.playerKeys)
         assertEquals(false, (SettingsSchema.byKey["Display|postprocess_dither"] as Setting.Bool).default)
     }

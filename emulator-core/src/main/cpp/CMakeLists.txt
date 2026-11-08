@@ -96,6 +96,17 @@ if(NOT XE_PYTHON3)
     message(FATAL_ERROR "python3 not found; required to generate SPIR-V shader bytecode.")
 endif()
 set(_xe_shader_root "${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia")
+# Reconfigure when UI shader entries or shared bodies change. Keep generated
+# bytecode out of this list so generation does not retrigger itself.
+file(GLOB _xe_ui_shader_inputs CONFIGURE_DEPENDS
+    "${_xe_shader_root}/ui/shaders/*.slang"
+    "${_xe_shader_root}/ui/shaders/*.xesl"
+    "${_xe_shader_root}/ui/shaders/*.xesli"
+    "${_xe_shader_root}/ui/shaders/*.glsl"
+    "${_xe_shader_root}/ui/shaders/*.glsli"
+    "${_xe_shader_root}/ui/shaders/*.hlsli")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_xe_ui_shader_inputs})
 execute_process(
     COMMAND "${XE_PYTHON3}"
             "${CMAKE_CURRENT_SOURCE_DIR}/xenia/tools/build/gen_android_spirv.py"
@@ -107,6 +118,12 @@ message(STATUS "XenDroid SPIR-V shader bytecode: ${_xe_spirv_out}")
 if(NOT _xe_spirv_result EQUAL 0)
     message(FATAL_ERROR "SPIR-V shader bytecode generation failed (exit ${_xe_spirv_result}).")
 endif()
+
+# Pinned ZeroFG source and shipped SPIR-V; no build-time download or loader link.
+set(ZEROFG_VULKAN_HEADERS_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/xenia/third_party/Vulkan-Headers/include")
+set(ZEROFG_PREBUILT_SHADERS ON CACHE STRING "Use ZeroFG's qualified shipped SPIR-V")
+add_subdirectory(zerofg EXCLUDE_FROM_ALL)
 
 add_subdirectory(xenia EXCLUDE_FROM_ALL)
 

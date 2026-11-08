@@ -15,6 +15,7 @@ upstream BSD/MIT files.
 |---|---|---|
 | Xendroid+ (this project's own code) | This repository | `LICENSE` at the repository root (AGPL-3.0-or-later) |
 | Xenia | Existing source tree | `emulator-core/src/main/cpp/xenia/LICENSE` (BSD) |
+| ZeroFG | Release v1.1.0 (`2b7711e47680c25dd461110c182ee5dd4a637f99`); provenance and mode mapping in `zerofg/SOURCE.md` | `zerofg/LICENSE` (Apache-2.0); Xenia-derived presenter glue retains its BSD notices |
 | Mbed TLS (kernel crypto and XEX decryption) | Mbed-TLS/mbedtls `068ff080b369adfac81509f9b57b2afabaf82dc5` (3.6.7; only the crypto sources the build uses) | `xenia/third_party/mbedtls/LICENSE` (Apache-2.0 OR GPL-2.0-or-later) |
 | Win-FG | The412Banner/win-fg `fbc69ed6c5bf16b824d0a29bd8b171675101f9dd` | `third_party/winfg/LICENSE` (MIT), FidelityFX notice and THIRD-PARTY.md |
 | LSFG host chain | The412Banner/Bannerlator `15d4f73c079824d54c468f079361ce56d88a7c2e` | `third_party/lsfg/LICENSE` and original GPL-3.0-or-later SPDX headers; Eden/WinNative/lsfg-vk credits preserved |

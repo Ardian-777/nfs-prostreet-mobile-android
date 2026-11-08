@@ -79,6 +79,11 @@ public class Emulator extends xendroid.emulator.Emulator{
     public native long[] rumble_state();
     public native long[] presenter_work();
     public native void set_frame_generation(boolean enabled, int preset, float displayHz);
+    // Requested ZeroFG mode: 0 off, 1 ReallyZero, 2 Zero. The render thread owns the switch.
+    public native void set_zerofg_mode(int mode);
+    public native int zerofg_mode();
+    public native boolean zerofg_main_surface_active();
+    public native double output_fps();
     public native long[] presentation_state();
     // GPU time per measured frame-generation pass: 0.25 ms buckets (last = 16 ms and more),
     // then the count of passes that could not be timed. Cumulative; take deltas.

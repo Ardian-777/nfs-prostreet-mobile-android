@@ -29,7 +29,7 @@ struct PresentationRuntime {
   std::atomic<int> frame_generation_engine{0}; // 0 Win-FG, 1 LSFG
   std::atomic<int> frame_generation_multiplier{2};
   std::atomic<uint64_t> configuration_epoch{0};
-  std::atomic<int> scaling_effect{-1}; // inherited / bilinear / CAS / FSR / SGSR / Lanczos / CRT
+  std::atomic<int> scaling_effect{-1}; // inherited / bilinear / CAS / FSR / SGSR / Lanczos / CRT / SGSR Edge
   // The in-game menu's Image options, applied from the next frame; a negative value
   // leaves the Settings value. Antialiasing: 0 none, 1 FXAA, 2 FXAA extreme.
   std::atomic<int> antialiasing{-1};

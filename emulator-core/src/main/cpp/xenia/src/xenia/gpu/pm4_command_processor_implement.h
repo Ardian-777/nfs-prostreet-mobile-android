@@ -878,6 +878,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(uint32_t packet,
                                          frontbuffer_height);
   }
 
+  ApplyGuestFpsLimitBeforeSwap();
+  VblankProbeSwap();
   const uint64_t fs_swap_begin = COMMAND_PROCESSOR::FrameStatsBegin();
   COMMAND_PROCESSOR::IssueSwap(frontbuffer_ptr, frontbuffer_width,
                                frontbuffer_height);
@@ -980,6 +982,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
   uint64_t log_begin_ns = 0;
   bool first_check = true;
   uint32_t value;
+  // The vblank probe: when this wait started, if it had to wait at all.
+  uint64_t probe_begin_ns = 0;
+  uint32_t probe_begin_value = 0;
+  uint32_t probe_begin_counter = 0;
+  bool probe_pulled = false;
 
   do {
     value = value_ref;
@@ -1028,6 +1035,17 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
         }
       }
       first_check = false;
+      // The guest vblank pull: a late frame waiting on its flip flag (asked
+      // again at each poll: it can become due while it waits).
+      if (!probe_pulled && VblankPullDue(poll_reg_addr, is_memory)) {
+        graphics_system_->RequestVblankPull();
+        probe_pulled = true;
+      }
+      if (!probe_begin_ns) {
+        probe_begin_ns = VblankProbeNowNs();
+        probe_begin_value = value;
+        probe_begin_counter = counter_;
+      }
       // Wait using the duration specified by the guest.
       if (wait >= 0x100) {
         PrepareForWait();
@@ -1082,6 +1100,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
         (COMMAND_PROCESSOR::FrameStatsNow() - log_begin_ns) / 1000,
         read_ptr_index_, write_ptr_index_.load(std::memory_order_relaxed),
         is_memory ? COMMAND_PROCESSOR::WrmWriterTake() : std::string());
+  }
+  if (probe_begin_ns) {
+    VblankProbeWait(poll_reg_addr, is_memory, probe_begin_ns, wait_info, ref,
+                    mask, probe_begin_value, value_ref, probe_begin_counter,
+                    probe_pulled);
   }
   return true;
 }

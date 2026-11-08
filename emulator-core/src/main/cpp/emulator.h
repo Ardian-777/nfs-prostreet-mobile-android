@@ -31,6 +31,8 @@ namespace ae{
     extern void surface_attach(ANativeWindow* w, int width, int height);
     extern void surface_detach();
     extern void surface_resize(int width, int height);
+    // Fire-and-forget forced paint, including while the guest is paused.
+    extern void RequestPresentationRefresh();
 
     extern void main_thr();
     extern void key_event(int key_code,bool pressed,int value);

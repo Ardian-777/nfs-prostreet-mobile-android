@@ -22,23 +22,32 @@ void VulkanPresenter::ResetColorFilter() {
   if (color_context_) { paint_context_.completion_timeline.AwaitAllSubmissions(); color_context_.reset(); }
 }
 bool VulkanPresenter::ApplyColorFilter(VkCommandBuffer cmd, std::shared_ptr<GuestOutputImage>& source) {
-  auto& f = vulkan_device_->functions(); auto device = vulkan_device_->device();
   if (!paint_context_.completion_timeline.AwaitAllSubmissions()) return false;
+  return ApplyColorFilterForDevice(cmd, source, vulkan_device_, color_context_);
+}
+// Callers own retirement: A waits above; each B Post job is reused only after
+// its final output and completion owner have retired. Never share descriptors
+// or work images between devices or jobs in flight.
+bool VulkanPresenter::ApplyColorFilterForDevice(
+    VkCommandBuffer cmd, std::shared_ptr<GuestOutputImage>& source,
+    const VulkanDevice* filter_device,
+    std::shared_ptr<ColorFilterContext>& filter_state) {
+  auto& f = filter_device->functions(); auto device = filter_device->device();
   const auto extent = source->extent();
-  if (color_context_ && (color_context_->input->extent().width != extent.width || color_context_->input->extent().height != extent.height)) ResetColorFilter();
-  if (!color_context_) {
+  if (filter_state && (filter_state->input->extent().width != extent.width || filter_state->input->extent().height != extent.height)) filter_state.reset();
+  if (!filter_state) {
     VkFormatProperties formats;
-    vulkan_device_->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(vulkan_device_->physical_device(), VK_FORMAT_R8G8B8A8_UNORM, &formats);
+    filter_device->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(filter_device->physical_device(), VK_FORMAT_R8G8B8A8_UNORM, &formats);
     VkFormatProperties guest_format;
-    vulkan_device_->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(vulkan_device_->physical_device(), kGuestOutputFormat, &guest_format);
+    filter_device->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(filter_device->physical_device(), kGuestOutputFormat, &guest_format);
     if (!(formats.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) ||
         !(formats.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
         !(formats.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
         !(guest_format.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) return false;
-    auto context = std::make_shared<ColorFilterContext>(vulkan_device_);
-    context->input = GuestOutputImage::Create(vulkan_device_, extent.width, extent.height, VK_FORMAT_R8G8B8A8_UNORM,
+    auto context = std::make_shared<ColorFilterContext>(filter_device);
+    context->input = GuestOutputImage::Create(filter_device, extent.width, extent.height, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    context->output = GuestOutputImage::Create(vulkan_device_, extent.width, extent.height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
+    context->output = GuestOutputImage::Create(filter_device, extent.width, extent.height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
     if (!context->input || !context->output) return false;
     VkDescriptorSetLayoutBinding bindings[2]{};
     for (unsigned i = 0; i < 2; ++i) { bindings[i].binding = i; bindings[i].descriptorCount = 1; bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; }
@@ -64,9 +73,9 @@ bool VulkanPresenter::ApplyColorFilter(VkCommandBuffer cmd, std::shared_ptr<Gues
     VkWriteDescriptorSet writes[2]{};
     for (unsigned i = 0; i < 2; ++i) { writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet = context->descriptors; writes[i].dstBinding = i; writes[i].descriptorCount = 1; writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[i].pImageInfo = &images[i]; }
     f.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-    color_context_ = context;
+    filter_state = context;
   }
-  auto& context = *color_context_;
+  auto& context = *filter_state;
   auto barrier = [&](VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags access) {
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}; b.oldLayout = from; b.newLayout = to;
     b.image = image; b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.srcAccessMask = from == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT; b.dstAccessMask = access;

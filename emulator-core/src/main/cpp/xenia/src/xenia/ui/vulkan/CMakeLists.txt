@@ -1,6 +1,11 @@
 add_library(xenia-ui-vulkan STATIC)
 xe_platform_sources(xenia-ui-vulkan ${CMAKE_CURRENT_SOURCE_DIR})
 xe_platform_sources(xenia-ui-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/functions)
+target_sources(xenia-ui-vulkan PRIVATE
+  ${PROJECT_SOURCE_DIR}/../zerofg/integration/xenia/zerofg_xenia_adapter.cc
+)
+target_include_directories(xenia-ui-vulkan PRIVATE ${PROJECT_SOURCE_DIR}/..)
+target_link_libraries(xenia-ui-vulkan PRIVATE zerofg::zerofg)
 # XenDroid (Android): skip shader regeneration on Android (see gpu/vulkan/CMakeLists.txt).
 if(NOT ANDROID)
   xe_shader_rules_spirv(xenia-ui-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)

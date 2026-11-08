@@ -174,13 +174,14 @@ void AndroidWindowedAppContext::PlatformQuitFromUIThread() {
     pthread_mutex_unlock(&mutex);
 }
 
-void AndroidWindowedAppContext::request_paint() {
+void AndroidWindowedAppContext::request_paint(bool force) {
     // FIRE-AND-FORGET. Must NEVER block: the GPU present thread calls this from
     // Presenter::PaintAndPresent while holding paint_mode_mutex_. Blocking here
     // (the old behavior) is the AB-BA deadlock -- main_thr would wait on the
     // pump while the GPU thread waits on main_thr holding paint_mode_mutex_.
     pthread_mutex_lock(&mutex);
     pending_events |= EVENT_PAINT;
+    if (force) pending_events |= EVENT_FORCE_PAINT;
     pthread_mutex_unlock(&mutex);
 }
 
@@ -198,7 +199,7 @@ void AndroidWindowedAppContext::main_loop(){
         uint32_t ev = pending_events;
         // PAINT is fire-and-forget; consume it now. EXECUTE is consumed here too
         // but its waiters block on exec_completed, signalled AFTER the run below.
-        pending_events &= ~(EVENT_PAINT | EVENT_EXECUTE_PENDING_FUNCTIONS);
+        pending_events &= ~(EVENT_PAINT | EVENT_FORCE_PAINT | EVENT_EXECUTE_PENDING_FUNCTIONS);
         uint64_t exec_to = exec_requested;
         pthread_mutex_unlock(&mutex);
 
@@ -224,7 +225,7 @@ void AndroidWindowedAppContext::main_loop(){
             // the wrong offset (latent UB), so go through emu_window->window().
             AndroidWindow* win = app->emu_window
                 ? static_cast<AndroidWindow*>(app->emu_window->window()) : nullptr;
-            if(win) win->Paint();
+            if(win) win->Paint((ev & EVENT_FORCE_PAINT) != 0);
         }
 
         if(ev & EVENT_QUIT){
@@ -300,8 +301,8 @@ void AndroidWindow::DetachSurface(){
     OnSurfaceChanged(false);
 }
 
-void AndroidWindow::Paint(){
-    OnPaint(false);
+void AndroidWindow::Paint(bool force){
+    OnPaint(force);
 }
 
 std::unique_ptr<xe::ui::Window> xe::ui::Window::Create(WindowedAppContext& app_context,
@@ -789,6 +790,13 @@ namespace ae{
     std::mutex window_mutex;
     // Set once in main_thr; null before boot. Used to marshal surface ops.
     AndroidWindowedAppContext* g_app_context = nullptr;
+    // Published once and never destroyed before process exit. JNI requests
+    // wake only the owner loop; it performs the reconnect and GPU teardown.
+    static std::atomic<AndroidWindowedAppContext*> g_presentation_context{nullptr};
+    void RequestPresentationRefresh() {
+        if (auto* context = g_presentation_context.load(std::memory_order_acquire))
+            context->request_paint(true);
+    }
 
     std::string game_id;
 
@@ -843,6 +851,7 @@ namespace ae{
         AndroidWindowedAppContext& wnd_ctx=*new AndroidWindowedAppContext();
         wnd_ctx.setup_ui_thr_id(std::this_thread::get_id());
         g_app_context=&wnd_ctx;
+        g_presentation_context.store(&wnd_ctx, std::memory_order_release);
         g_windowed_app=xe::ui::GetWindowedAppCreator()(wnd_ctx);
         g_windowed_app_ref=dynamic_cast<EmulatorApp*>(g_windowed_app.get());
 
