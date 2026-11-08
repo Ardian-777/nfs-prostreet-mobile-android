@@ -1,0 +1,6 @@
+# Keep the approved shader headers byte-identical to their generated LF form.
+shaders/prebuilt/** text eol=lf linguist-generated=true
+
+# Preserve these two imported headers exactly, including their upstream EOF.
+src/vulkan_dispatch.h whitespace=-blank-at-eof
+src/vulkan_image.h whitespace=-blank-at-eof
