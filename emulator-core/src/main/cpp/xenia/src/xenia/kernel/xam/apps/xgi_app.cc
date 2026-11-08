@@ -8,6 +8,11 @@
  */
 
 #include "xenia/kernel/xam/apps/xgi_app.h"
+
+#include <cstring>
+#include <random>
+
+#include "xenia/kernel/systemlink.h"
 #include "xenia/kernel/xsession.h"
 
 #include "xenia/base/logging.h"
@@ -103,6 +108,34 @@ struct XUSER_ANID {
 };
 
 XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
+
+// XSESSION_INFO for a system link host: XNKID sessionID, XNADDR hostAddress,
+// XNKEY keyExchangeKey; then the session's nonce (8 bytes).
+static void FillSystemLinkSession(uint8_t* info, uint8_t* nonce) {
+  std::random_device rnd;
+  std::mt19937_64 gen(rnd());
+  const auto random = [&gen](uint8_t* out, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+      out[i] = static_cast<uint8_t>(gen());
+    }
+  };
+  std::memset(info, 0, 0x3C);
+  random(info, 8);
+  info[0] &= 0x1F;  // the system link kind (XNetXnKidIsSystemLink)
+  // XNADDR: ina in network order, inaOnline, wPortOnline, abEnet, abOnline.
+  const uint32_t address = systemlink::LocalAddress();
+  xe::store_and_swap<uint32_t>(info + 0x08, address);
+  systemlink::MacAddress(info + 0x12);
+  random(info + 0x2C, 16);
+  if (nonce) {
+    random(nonce, 8);
+  }
+  XELOGI("System link: hosting session {:02X}{:02X}{:02X}{:02X}{:02X}{:02X}"
+         "{:02X}{:02X} at {}.{}.{}.{}",
+         info[0], info[1], info[2], info[3], info[4], info[5], info[6],
+         info[7], address >> 24, (address >> 16) & 0xFF, (address >> 8) & 0xFF,
+         address & 0xFF);
+}
 
 // http://mb.mirage.org/bugzilla/xliveless/main.c
 
@@ -224,6 +257,18 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
       if (IsXboxLiveSession(static_cast<SessionFlags>(flags))) {
         return 0x80155209;  // X_ONLINE_E_SESSION_NOT_LOGGED_ON
+      }
+
+      // A system link host's session: what its title announces to the others
+      // (XSESSION_INFO), its id, its address and its key. One who joins gives
+      // the host's, as it heard it.
+      if (systemlink::Enabled() && (flags & SessionFlags::HOST) &&
+          (flags & SessionFlags::PEER_NETWORK) && session_info_ptr) {
+        FillSystemLinkSession(memory_->TranslateVirtual<uint8_t*>(
+                                  session_info_ptr),
+                              nonce_ptr ? memory_->TranslateVirtual<uint8_t*>(
+                                              nonce_ptr)
+                                        : nullptr);
       }
 
       return X_E_SUCCESS;

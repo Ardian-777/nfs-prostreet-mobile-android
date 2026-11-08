@@ -10,6 +10,7 @@
 #include "xenia/kernel/xam/apps/xlivebase_app.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/kernel/systemlink.h"
 #include "xenia/kernel/xenumerator.h"
 
 #include <asio.hpp>
@@ -88,6 +89,15 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       // Buffer only set when online
       assert_true(!buffer_length || buffer_length == 4);
       XELOGD("XLiveBaseGetNatType({:08X})", buffer_ptr);
+      // With system link a title compares its NAT type with the host's
+      // before joining, and turns down a party whose type it can't tell
+      // ("incompatible network setup"): consoles on one network reach each
+      // other directly, which is what an open NAT says.
+      if (systemlink::Enabled() && buffer_ptr) {
+        constexpr uint32_t XONLINE_NAT_OPEN = 1;
+        xe::store_and_swap<uint32_t>(buffer, XONLINE_NAT_OPEN);
+        return X_E_SUCCESS;
+      }
       return 0x80151802;  // X_ONLINE_E_LOGON_NOT_LOGGED_ON
     }
     case 0x00058007: {

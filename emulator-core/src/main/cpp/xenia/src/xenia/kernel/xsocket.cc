@@ -13,6 +13,7 @@
 #include <cstring>
 #include <future>
 #include <optional>
+#include <string_view>
 #include <thread>
 
 #include "xenia/base/clock.h"
@@ -22,6 +23,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/systemlink.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xsocket_options.h"
@@ -280,6 +282,11 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
     int reuse = 1;
     setsockopt(static_cast<int>(native_handle()), SOL_SOCKET, SO_REUSEADDR,
                reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+  }
+
+  // System link titles broadcast without always asking for it.
+  if (type == Type::X_SOCK_DGRAM && systemlink::Enabled()) {
+    udp_socket_->set_option(asio::socket_base::broadcast(true), ec);
   }
 
   return X_STATUS_SUCCESS;
@@ -583,6 +590,10 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   auto* addr_in = reinterpret_cast<N_XSOCKADDR_IN*>(name);
   asio::ip::address_v4 addr(addr_in->sin_addr);
   uint16_t port = addr_in->sin_port;
+  // A console's low port is where its bind put it (Bind).
+  if (systemlink::IsConsole(addr.to_uint())) {
+    port = systemlink::HostPort(port);
+  }
 
   asio::error_code ec;
 
@@ -629,8 +640,9 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   // privileges. Remap to port + 10000 to avoid privilege issues.
   // Note: N_XSOCKADDR_IN uses xe::be<> which auto-converts to/from host endian.
   const uint16_t original_port = static_cast<uint16_t>(name->sin_port);
-  if (original_port < 1024 && original_port != 0) {
-    uint16_t new_port = original_port + 10000;
+  const uint16_t new_port = systemlink::HostPort(original_port);
+  port_shifted_ = new_port != original_port;
+  if (port_shifted_) {
     name->sin_port = new_port;
     XELOGW("XSocket::Bind: port {} requires privileges, remapping to port {}",
            original_port, new_port);
@@ -757,9 +769,12 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
     AcceptedName(name, name_len, std::nullopt);
     return nullptr;
   }
+  const uint32_t peer_address = peer_endpoint.address().to_v4().to_uint();
   AcceptedName(name, name_len,
-               AcceptedPeer{peer_endpoint.address().to_v4().to_uint(),
-                            peer_endpoint.port()});
+               AcceptedPeer{peer_address,
+                            systemlink::IsConsole(peer_address)
+                                ? systemlink::GuestPort(peer_endpoint.port())
+                                : peer_endpoint.port()});
 
   // Create a kernel object to represent the new socket
   auto socket =
@@ -855,14 +870,32 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
   if (udp_socket_) {
     asio::ip::udp::endpoint sender_endpoint;
     RunCooperatively(ec, RetryMode::kReceive, [&]() {
-      bytes_received = udp_socket_->receive_from(asio::buffer(buf, buf_len),
-                                                 sender_endpoint, 0, ec);
+      for (;;) {
+        bytes_received = udp_socket_->receive_from(asio::buffer(buf, buf_len),
+                                                   sender_endpoint, 0, ec);
+        if (ec || !IsOwnBroadcast(sender_endpoint, buf, bytes_received)) {
+          break;
+        }
+        // A console never hears its own broadcast; the next datagram, or
+        // would_block when there is none.
+      }
     });
 
+    if (!ec) {
+      const uint32_t sender = sender_endpoint.address().to_v4().to_uint();
+      systemlink::Heard(sender);
+      if (systemlink::Enabled()) {
+        systemlink::Trace(false, sender, sender_endpoint.port(), bound_port_,
+                          buf, bytes_received);
+      }
+    }
     if (!ec && from) {
+      const uint32_t sender = sender_endpoint.address().to_v4().to_uint();
       from->sin_family = AF_INET;
-      from->sin_addr = sender_endpoint.address().to_v4().to_uint();
-      from->sin_port = sender_endpoint.port();
+      from->sin_addr = sender;
+      from->sin_port = systemlink::IsConsole(sender)
+                           ? systemlink::GuestPort(sender_endpoint.port())
+                           : sender_endpoint.port();
       std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
     }
     if (from_len) {
@@ -928,17 +961,64 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
     if (to) {
       asio::ip::address_v4 addr(to->sin_addr);
       uint16_t port = to->sin_port;
+      if (systemlink::IsConsole(addr.to_uint())) {
+        port = systemlink::HostPort(port);
+      }
+      const bool broadcast =
+          systemlink::Enabled() && systemlink::IsBroadcast(addr.to_uint());
+      if (broadcast) {
+        addr = asio::ip::address_v4(systemlink::BroadcastAddress());
+      }
       asio::ip::udp::endpoint endpoint(addr, port);
 
+      if (broadcast) {
+        NoteBroadcast(buf, buf_len);
+      }
       RunCooperatively(ec, RetryMode::kSend, [&]() {
         bytes_sent = udp_socket_->send_to(asio::buffer(buf, buf_len), endpoint,
                                           flags, ec);
       });
+
+      if (systemlink::Enabled()) {
+        if (ec && ec != asio::error::would_block) {
+          static std::atomic<int> failures_logged = 0;
+          if (failures_logged++ < 16) {
+            XELOGW("System link: sending to {} port {} failed: {}",
+                   systemlink::Describe(addr.to_uint()), port, ec.message());
+          }
+        } else if (!ec) {
+          systemlink::Trace(true, addr.to_uint(), port, bound_port_, buf,
+                            bytes_sent);
+        }
+      }
+
+      // And to the consoles the local network's broadcasts don't reach. Their
+      // failures are theirs: the title sent its broadcast.
+      if (broadcast && !ec) {
+        for (uint32_t peer : systemlink::BroadcastPeers()) {
+          asio::error_code peer_ec;
+          udp_socket_->send_to(
+              asio::buffer(buf, buf_len),
+              asio::ip::udp::endpoint(asio::ip::address_v4(peer), port), flags,
+              peer_ec);
+        }
+      }
     } else {
       // Send to connected endpoint
       RunCooperatively(ec, RetryMode::kSend, [&]() {
         bytes_sent = udp_socket_->send(asio::buffer(buf, buf_len), flags, ec);
       });
+      if (systemlink::Enabled()) {
+        asio::error_code peer_ec;
+        const auto peer = udp_socket_->remote_endpoint(peer_ec);
+        if (!ec && !peer_ec) {
+          systemlink::Trace(true, peer.address().to_v4().to_uint(),
+                            peer.port(), bound_port_, buf, bytes_sent);
+        } else if (ec && ec != asio::error::would_block) {
+          XELOGW("System link: sending on a connected socket failed: {}",
+                 ec.message());
+        }
+      }
     }
   } else if (tcp_socket_) {
     RunCooperatively(ec, RetryMode::kSend, [&]() {
@@ -1072,9 +1152,15 @@ X_STATUS XSocket::QueryName(bool peer, N_XSOCKADDR_IN* name) {
     return X_STATUS_UNSUCCESSFUL;
   }
 
+  const uint32_t address = ntohl(host_name.sin_addr.s_addr);
+  uint16_t port = ntohs(host_name.sin_port);
+  // The title sees the port it asked for (Bind), and a console's as it asked.
+  if (peer ? systemlink::IsConsole(address) : port_shifted_) {
+    port = systemlink::GuestPort(port);
+  }
   name->sin_family = host_name.sin_family;
-  name->sin_port = ntohs(host_name.sin_port);
-  name->sin_addr = ntohl(host_name.sin_addr.s_addr);
+  name->sin_port = port;
+  name->sin_addr = address;
   std::memset(name->x_sin_zero, 0, sizeof(name->x_sin_zero));
   return X_STATUS_SUCCESS;
 }
@@ -1085,6 +1171,37 @@ X_STATUS XSocket::GetSockName(N_XSOCKADDR_IN* name) {
 
 X_STATUS XSocket::GetPeerName(N_XSOCKADDR_IN* name) {
   return QueryName(true, name);
+}
+
+static uint64_t BroadcastHash(const uint8_t* buf, size_t len) {
+  return std::hash<std::string_view>()(
+             std::string_view(reinterpret_cast<const char*>(buf), len)) ^
+         len;
+}
+
+void XSocket::NoteBroadcast(const uint8_t* buf, size_t len) {
+  std::lock_guard<std::mutex> lock(broadcasts_mutex_);
+  broadcasts_sent_[broadcasts_next_++ % broadcasts_sent_.size()] =
+      BroadcastHash(buf, len);
+}
+
+bool XSocket::IsOwnBroadcast(const asio::ip::udp::endpoint& sender,
+                             const uint8_t* buf, size_t len) {
+  // What this socket broadcast comes back from this device and its own port,
+  // as it was sent. A datagram the title sent itself is not dropped.
+  if (!systemlink::Enabled() || sender.port() != bound_port_ ||
+      !systemlink::IsLocalAddress(sender.address().to_v4().to_uint())) {
+    return false;
+  }
+  const uint64_t hash = BroadcastHash(buf, len);
+  std::lock_guard<std::mutex> lock(broadcasts_mutex_);
+  for (uint64_t& sent : broadcasts_sent_) {
+    if (sent == hash) {
+      sent = 0;
+      return true;
+    }
+  }
+  return false;
 }
 
 uint32_t XSocket::GetLastWSAError() const { return last_error_; }

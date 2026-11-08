@@ -192,6 +192,8 @@ object SettingCatalog {
             e("Kernel|apply_title_update", A),
             e("Kernel|allow_incompatible_title_update", A),
             e("Kernel|network_enabled", A),
+            e("Network|systemlink", A),
+            e("Network|systemlink_peers", A, dependsOn = "Network|systemlink" to "true"),
             e("Content|license_mask", A),
             e("Console|video_standard", A),
             e("Console|use_50Hz_mode", A),

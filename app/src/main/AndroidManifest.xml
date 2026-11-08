@@ -4,6 +4,10 @@
     <!-- Network: core's Application/native may probe; matches legacy :app. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- System link: the Wi-Fi's broadcast address, and the multicast lock that keeps the
+         other consoles' broadcasts coming. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Legacy storage (maxSdkVersion guards: SAF is the real path on 29+). -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />

@@ -9,10 +9,19 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <random>
+#include <set>
+#include <thread>
+#include <vector>
 
 #include "xenia/base/logging.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/systemlink.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_private.h"
@@ -24,11 +33,12 @@
 #include "xenia/xbox.h"
 
 DEFINE_bool(network_enabled, true,
-            "Let titles open host sockets. The XNet address and session layer "
-            "is stubbed, so guest traffic cannot reach a peer, but titles that "
-            "do not check for socket creation failure crash outright when this "
-            "is off. Turn it off only for titles that block indefinitely on a "
-            "socket that never answers.",
+            "Let titles open host sockets. Without system link (systemlink) "
+            "the XNet address and session layer is stubbed, so guest traffic "
+            "cannot reach a peer, but titles that do not check for socket "
+            "creation failure crash outright when this is off. Turn it off "
+            "only for titles that block indefinitely on a socket that never "
+            "answers.",
             "Kernel");
 
 #ifdef XE_PLATFORM_WIN32
@@ -67,6 +77,42 @@ typedef struct {
   uint8_t abEnet[6];             // Ethernet MAC address
   uint8_t abOnline[20];          // Online identification
 } XNADDR;
+
+// A session's key id. Its first byte says what kind: system link when the top
+// three bits are clear (XNetXnKidIsSystemLink).
+struct XNKID {
+  uint8_t ab[8];
+};
+static_assert_size(XNKID, 8);
+
+struct XNKEY {
+  uint8_t ab[16];
+};
+static_assert_size(XNKEY, 16);
+
+// System link (xenia/kernel/systemlink.h): a console's XNADDR carries its
+// real address, so its IN_ADDR is that address, and the XNADDRs titles hand
+// XNetXnAddrToInAddr are kept to answer XNetInAddrToXnAddr.
+namespace {
+std::mutex xnaddr_mutex;
+std::map<uint32_t, XNADDR> xnaddrs;  // by IPv4 address, host order
+XNKID registered_key = {};
+bool key_registered = false;
+uint16_t systemlink_port = 3074;
+
+// XNetQosLookup results not yet released, which their probes may still fill.
+std::mutex qos_mutex;
+std::set<uint32_t> qos_lookups;
+
+void RandomBytes(uint8_t* out, size_t count) {
+  std::random_device rnd;
+  std::mt19937_64 gen(rnd());
+  std::uniform_int_distribution<int> dist(0,
+                                          std::numeric_limits<uint8_t>::max());
+  std::generate(out, out + count,
+                [&]() { return static_cast<uint8_t>(dist(gen)); });
+}
+}  // namespace
 
 struct XNDNS {
   xe::be<int32_t> status;
@@ -519,8 +565,45 @@ struct XnAddrStatus {
   static constexpr uint32_t XNET_GET_XNADDR_TROUBLESHOOT = 0x00008000;
 };
 
+// A console's machine id, by which titles tell the consoles in a party apart:
+// with system link, made from its Ethernet address (its own on each device),
+// under the 0xFA prefix real machine ids have.
+static uint64_t MachineIdFromEnet(const uint8_t enet[6]) {
+  uint64_t id = 0xFA00ull << 48;
+  for (int i = 0; i < 6; i++) {
+    id |= uint64_t(enet[i]) << (8 * (5 - i));
+  }
+  return id;
+}
+
 dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> addr_ptr) {
+  if (systemlink::Enabled()) {
+    // This console as the others on the network reach it.
+    const uint32_t local = systemlink::LocalAddress();
+    addr_ptr.Zero();
+    if (!local) {
+      // No network yet (Wi-Fi off): what a console without a cable says.
+      return XnAddrStatus::XNET_GET_XNADDR_ETHERNET;
+    }
+    addr_ptr->ina.s_addr = htonl(local);
+    systemlink::MacAddress(addr_ptr->abEnet);
+    // abOnline, the console's identity (SGADDR): its address, a security
+    // parameter index, its machine id and its platform, a 360 (some titles
+    // join only their own). Its own on each console: titles tell consoles
+    // apart, themselves included, by it.
+    uint8_t* online = addr_ptr->abOnline;
+    xe::store_and_swap<uint32_t>(online + 0, local);
+    xe::store_and_swap<uint32_t>(
+        online + 4, uint32_t(MachineIdFromEnet(addr_ptr->abEnet) * 2654435761u));
+    xe::store_and_swap<uint64_t>(online + 8,
+                                 MachineIdFromEnet(addr_ptr->abEnet));
+    online[16] = 1;
+    return XnAddrStatus::XNET_GET_XNADDR_DHCP |
+           XnAddrStatus::XNET_GET_XNADDR_GATEWAY |
+           XnAddrStatus::XNET_GET_XNADDR_DNS;
+  }
+
   // Just return a loopback address atm.
   addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
   addr_ptr->inaOnline.s_addr = 0;
@@ -556,11 +639,32 @@ DECLARE_XAM_EXPORT1(NetDll_XNetGetDebugXnAddr, kNetworking, kStub);
 
 dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
                                                   pointer_t<XNADDR> addr_ptr,
-                                                  lpdword_t id_ptr) {
-  // Tell the caller we're not signed in to live (non-zero ret)
-  return 1;
+                                                  lpqword_t id_ptr) {
+  if (!systemlink::Enabled()) {
+    // Tell the caller we're not signed in to live (non-zero ret)
+    return 1;
+  }
+  if (!addr_ptr || !id_ptr) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+  *id_ptr = MachineIdFromEnet(addr_ptr->abEnet);
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToMachineId, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToMachineId, kNetworking, kImplemented);
+
+dword_result_t XNetLogonGetMachineID_entry(lpqword_t id_ptr) {
+  if (!systemlink::Enabled()) {
+    return X_E_FAIL;
+  }
+  if (!id_ptr) {
+    return X_E_INVALIDARG;
+  }
+  uint8_t mac[6];
+  systemlink::MacAddress(mac);
+  *id_ptr = MachineIdFromEnet(mac);
+  return X_E_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XNetLogonGetMachineID, kNetworking, kImplemented);
 
 dword_result_t XNetLogonGetTitleID_entry(dword_t caller, lpvoid_t params) {
   return kernel_state()->title_id();
@@ -584,29 +688,122 @@ DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToString, kNetworking, kImplemented);
 
 // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for
 // subsequent socket calls (like a handle to a XNet address)
+// With system link the IN_ADDR is the console's real address, which the
+// title then sends to and connects to like any other.
 dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> xn_addr,
-                                               lpvoid_t xid, lpvoid_t in_addr) {
-  return 1;
+                                               pointer_t<XNKID> xid,
+                                               lpdword_t in_addr) {
+  if (!systemlink::Enabled()) {
+    return 1;
+  }
+  if (!xn_addr || !in_addr) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+  const uint32_t address = ntohl(xn_addr->ina.s_addr);
+  if (!address) {
+    XELOGW("System link: title asked the IN_ADDR of an XNADDR without one");
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+  uint8_t mac[6];
+  systemlink::MacAddress(mac);
+  if (!std::memcmp(mac, xn_addr->abEnet, 6) &&
+      address != systemlink::LocalAddress()) {
+    // Two devices with one identity: each drops the other's frames as its
+    // own on a real network. Here it only confuses the title's peer lists.
+    XELOGW(
+        "System link: the console at {}.{}.{}.{} has this one's Ethernet "
+        "address; give each device its own (systemlink_mac)",
+        address >> 24, (address >> 16) & 0xFF, (address >> 8) & 0xFF,
+        address & 0xFF);
+  }
+  {
+    std::lock_guard<std::mutex> lock(xnaddr_mutex);
+    if (!xnaddrs.count(address)) {
+      XELOGI("System link: title resolved the XNADDR of {}",
+             systemlink::Describe(address));
+    }
+    xnaddrs[address] = *xn_addr;
+  }
+  // The guest's IN_ADDR is in network order, as XNADDR's.
+  *in_addr = address;
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kImplemented);
 
-// Does the reverse of the above.
-// FIXME: Arguments may not be correct.
-dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, lpvoid_t in_addr,
+// Does the reverse of the above: INT XNetInAddrToXnAddr(IN_ADDR ina,
+// XNADDR* pxna, XNKID* pxnkid), the IN_ADDR by value.
+dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
                                                pointer_t<XNADDR> xn_addr,
-                                               lpvoid_t xid) {
-  return 1;
+                                               pointer_t<XNKID> xid) {
+  if (!systemlink::Enabled()) {
+    return 1;
+  }
+  const uint32_t address = in_addr;
+  if (xn_addr) {
+    std::lock_guard<std::mutex> lock(xnaddr_mutex);
+    const auto known = xnaddrs.find(address);
+    if (known != xnaddrs.end()) {
+      *xn_addr = known->second;
+    } else {
+      xn_addr.Zero();
+      xn_addr->ina.s_addr = htonl(address);
+      if (address == systemlink::LocalAddress()) {
+        systemlink::MacAddress(xn_addr->abEnet);
+      }
+    }
+  }
+  if (xid) {
+    std::lock_guard<std::mutex> lock(xnaddr_mutex);
+    *xid = registered_key;
+  }
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kImplemented);
+
+dword_result_t NetDll_XNetUnregisterInAddr_entry(dword_t caller,
+                                                 dword_t in_addr) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterInAddr, kNetworking, kImplemented);
+
+// The security association a real console negotiates first: none here, the
+// address is reachable as it is.
+dword_result_t NetDll_XNetConnect_entry(dword_t caller, dword_t in_addr) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetConnect, kNetworking, kImplemented);
+
+dword_result_t NetDll_XNetGetConnectStatus_entry(dword_t caller,
+                                                 dword_t in_addr) {
+  constexpr uint32_t XNET_CONNECT_STATUS_IDLE = 0;
+  constexpr uint32_t XNET_CONNECT_STATUS_CONNECTED = 2;
+  return systemlink::Enabled() ? XNET_CONNECT_STATUS_CONNECTED
+                               : XNET_CONNECT_STATUS_IDLE;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetGetConnectStatus, kNetworking, kImplemented);
 
 // https://www.google.com/patents/WO2008112448A1?cl=en
 // Reserves a port for use by system link
 dword_result_t NetDll_XNetSetSystemLinkPort_entry(dword_t caller,
                                                   dword_t port) {
-  return 1;
+  if (!systemlink::Enabled()) {
+    return 1;
+  }
+  // Big-endian in the guest's word, as the port it is.
+  systemlink_port = static_cast<uint16_t>(port);
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetSetSystemLinkPort, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetSetSystemLinkPort, kNetworking, kImplemented);
+
+dword_result_t NetDll_XNetGetSystemLinkPort_entry(dword_t caller,
+                                                  lpword_t port) {
+  if (port) {
+    *port = systemlink_port;
+  }
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetGetSystemLinkPort, kNetworking, kImplemented);
 
 // https://github.com/ILOVEPIE/Cxbx-Reloaded/blob/master/src/CxbxKrnl/EmuXOnline.h#L39
 struct XEthernetStatus {
@@ -618,9 +815,16 @@ struct XEthernetStatus {
 };
 
 dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
+  // Titles offer system link only with a cable in.
+  if (systemlink::Enabled() && systemlink::LocalAddress()) {
+    return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE |
+           XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
+           XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
+  }
   return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetGetEthernetLinkStatus, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetGetEthernetLinkStatus, kNetworking,
+                    kSketchy);
 
 // No System Link broadcast ever reaches a title here, so none is from another
 // version.
@@ -686,17 +890,167 @@ dword_result_t NetDll_XNetQosRelease_entry(dword_t caller,
   if (!qos) {
     return X_STATUS_INVALID_PARAMETER;
   }
+  // A lookup still probing finds it gone and leaves it be.
+  std::lock_guard<std::mutex> lock(qos_mutex);
+  qos_lookups.erase(qos.guest_address());
   kernel_memory()->SystemHeapFree(qos.guest_address());
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetQosRelease, kNetworking, kStub);
 
-dword_result_t NetDll_XNetQosListen_entry(dword_t caller, lpvoid_t id,
+// A system link host publishes its session here, for the QoS probes the
+// others send before joining it (systemlink::QosProbe).
+dword_result_t NetDll_XNetQosListen_entry(dword_t caller, pointer_t<XNKID> id,
                                           lpvoid_t data, dword_t data_size,
-                                          dword_t r7, dword_t flags) {
-  return X_ERROR_FUNCTION_FAILED;
+                                          dword_t bits_per_sec, dword_t flags) {
+  constexpr uint32_t XNET_QOS_LISTEN_ENABLE = 0x01;
+  constexpr uint32_t XNET_QOS_LISTEN_DISABLE = 0x02;
+  constexpr uint32_t XNET_QOS_LISTEN_SET_DATA = 0x04;
+  constexpr uint32_t XNET_QOS_LISTEN_RELEASE = 0x10;
+  if (!systemlink::Enabled()) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
+  if (!id) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+  XELOGI("System link: title publishes session {:02X}{:02X}.. for QoS, "
+         "flags {:02X}, {} bytes",
+         id->ab[0], id->ab[1], uint32_t(flags), uint32_t(data_size));
+  if (flags & XNET_QOS_LISTEN_RELEASE) {
+    systemlink::QosRelease(id->ab);
+    return 0;
+  }
+  if (flags & XNET_QOS_LISTEN_SET_DATA) {
+    systemlink::QosSetData(id->ab, data ? data.as<const uint8_t*>() : nullptr,
+                           data ? uint32_t(data_size) : 0u);
+  }
+  if (flags & (XNET_QOS_LISTEN_ENABLE | XNET_QOS_LISTEN_DISABLE)) {
+    systemlink::QosSetEnabled(id->ab, (flags & XNET_QOS_LISTEN_ENABLE) != 0);
+  }
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetQosListen, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetQosListen, kNetworking, kImplemented);
+
+// INT XNetQosLookup(UINT cxna, const XNADDR* apxna[], const XNKID* apxnkid[],
+// const XNKEY* apxnkey[], UINT cina, const IN_ADDR aina[],
+// const DWORD adwServiceId[], UINT cProbes, DWORD dwBitsPerSec, DWORD dwFlags,
+// WSAEVENT hEvent, XNQOS** ppxnqos): the consoles by XNADDR are probed in the
+// background, each answer filled in as it comes; servers by IN_ADDR (Xbox
+// Live's) never answer.
+dword_result_t NetDll_XNetQosLookup_entry(
+    dword_t caller, dword_t num_xnaddrs, lpdword_t xnaddrs_ptr,
+    lpdword_t xnkids_ptr, lpdword_t xnkeys_ptr, dword_t num_ins,
+    lpdword_t ins_ptr, lpdword_t service_ids_ptr, dword_t probes,
+    dword_t bits_per_sec, dword_t flags, dword_t event_handle,
+    lpdword_t pqos) {
+  constexpr uint8_t XNET_XNQOSINFO_COMPLETE = 0x01;
+  constexpr uint8_t XNET_XNQOSINFO_TARGET_CONTACTED = 0x02;
+  constexpr uint8_t XNET_XNQOSINFO_TARGET_DISABLED = 0x04;
+  constexpr uint8_t XNET_XNQOSINFO_DATA_RECEIVED = 0x08;
+  constexpr uint32_t kDataMax = 1024;
+  // What a LAN measures; titles only compare it against their minimum.
+  constexpr uint32_t kBitsPerSec = 100000000;
+
+  if (!pqos) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+  const bool probing = systemlink::Enabled() && xnaddrs_ptr && xnkids_ptr;
+  const uint32_t consoles = probing ? uint32_t(num_xnaddrs) : 0;
+  const uint32_t count = uint32_t(num_xnaddrs) + uint32_t(num_ins);
+  const uint32_t infos = std::max(count, 1u);
+  const uint32_t data_at = 8 + infos * sizeof(XNQOSINFO);
+  const uint32_t size = data_at + count * kDataMax;
+
+  const uint32_t qos_guest = kernel_memory()->SystemHeapAlloc(size);
+  if (!qos_guest) {
+    return uint32_t(X_WSAError::X_WSAEFAULT);
+  }
+  kernel_memory()->Zero(qos_guest, size);
+  auto qos = kernel_memory()->TranslateVirtual<XNQOS*>(qos_guest);
+  qos->count = count;
+  qos->count_pending = consoles;
+  for (uint32_t i = 0; i < count; i++) {
+    XNQOSINFO& info = qos->info[i];
+    info.data_ptr = qos_guest + data_at + i * kDataMax;
+    if (i >= consoles) {
+      info.flags = XNET_XNQOSINFO_COMPLETE;
+    }
+  }
+
+  object_ref<XEvent> ev;
+  if (event_handle) {
+    ev = kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
+  }
+  {
+    std::lock_guard<std::mutex> lock(qos_mutex);
+    qos_lookups.insert(qos_guest);
+  }
+  *pqos = qos_guest;
+  if (!consoles) {
+    if (ev) {
+      ev->Set(0, false);
+    }
+    return 0;
+  }
+
+  XELOGI("System link: title asked QoS of {} consoles, {} servers, {} probes",
+         consoles, uint32_t(num_ins), uint32_t(probes));
+  for (uint32_t i = 0; i < consoles; i++) {
+    // Copied now: the title's arrays need not outlive the call.
+    const uint32_t xnaddr_guest = xnaddrs_ptr[i];
+    const uint32_t xnkid_guest = xnkids_ptr[i];
+    if (!xnaddr_guest || !xnkid_guest) {
+      std::lock_guard<std::mutex> lock(qos_mutex);
+      qos->info[i].flags = XNET_XNQOSINFO_COMPLETE;
+      qos->count_pending = qos->count_pending - 1;
+      if (!qos->count_pending && ev) {
+        ev->Set(0, false);
+      }
+      continue;
+    }
+    const uint32_t address = ntohl(
+        kernel_memory()->TranslateVirtual<XNADDR*>(xnaddr_guest)->ina.s_addr);
+    XNKID kid = *kernel_memory()->TranslateVirtual<XNKID*>(xnkid_guest);
+    std::thread([=]() {
+      const auto result = systemlink::QosProbe(address, kid.ab, probes);
+      std::lock_guard<std::mutex> lock(qos_mutex);
+      if (!qos_lookups.count(qos_guest)) {
+        return;  // released meanwhile
+      }
+      auto qos = kernel_memory()->TranslateVirtual<XNQOS*>(qos_guest);
+      XNQOSINFO& info = qos->info[i];
+      uint8_t info_flags = XNET_XNQOSINFO_COMPLETE;
+      if (result.contacted) {
+        info_flags |= XNET_XNQOSINFO_TARGET_CONTACTED;
+        if (result.disabled) {
+          info_flags |= XNET_XNQOSINFO_TARGET_DISABLED;
+        }
+        if (!result.data.empty()) {
+          info_flags |= XNET_XNQOSINFO_DATA_RECEIVED;
+          const uint32_t len =
+              std::min<uint32_t>(uint32_t(result.data.size()), kDataMax);
+          std::memcpy(kernel_memory()->TranslateVirtual(info.data_ptr),
+                      result.data.data(), len);
+          info.data_len = static_cast<uint16_t>(len);
+        }
+        info.rtt_min_in_msecs = result.rtt_min_ms;
+        info.rtt_med_in_msecs = result.rtt_med_ms;
+        info.up_bits_per_sec = kBitsPerSec;
+        info.down_bits_per_sec = kBitsPerSec;
+      }
+      info.probes_xmit = result.probes_sent;
+      info.probes_recv = result.probes_received;
+      info.flags = info_flags;
+      const uint32_t pending = qos->count_pending - 1;
+      qos->count_pending = pending;
+      if (!pending && ev) {
+        ev->Set(0, false);
+      }
+    }).detach();
+  }
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetQosLookup, kNetworking, kImplemented);
 
 dword_result_t NetDll_inet_addr_entry(lpstring_t addr_ptr) {
   if (!addr_ptr) {
@@ -1367,22 +1721,51 @@ dword_result_t NetDll_getpeername_entry(dword_t caller, dword_t socket_handle,
 }
 DECLARE_XAM_EXPORT1(NetDll_getpeername, kNetworking, kImplemented);
 
-dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
-                                          lpdword_t exchange_key) {
-  kernel_memory()->Fill(key_id.guest_address(), 8, 0xBE);
-  kernel_memory()->Fill(exchange_key.guest_address(), 16, 0xBE);
+dword_result_t NetDll_XNetCreateKey_entry(dword_t caller,
+                                          pointer_t<XNKID> key_id,
+                                          pointer_t<XNKEY> exchange_key) {
+  if (!systemlink::Enabled()) {
+    kernel_memory()->Fill(key_id.guest_address(), 8, 0xBE);
+    kernel_memory()->Fill(exchange_key.guest_address(), 16, 0xBE);
+    return 0;
+  }
+  // A random one, of the system link kind: a host's session is told apart
+  // from the next by it.
+  XNKID kid;
+  XNKEY key;
+  RandomBytes(kid.ab, sizeof(kid.ab));
+  RandomBytes(key.ab, sizeof(key.ab));
+  kid.ab[0] &= 0x1F;
+  *key_id = kid;
+  *exchange_key = key;
   return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetCreateKey, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetCreateKey, kNetworking, kImplemented);
 
-dword_result_t NetDll_XNetRegisterKey_entry(dword_t caller, lpdword_t key_id,
-                                            lpdword_t exchange_key) {
+dword_result_t NetDll_XNetRegisterKey_entry(dword_t caller,
+                                            pointer_t<XNKID> key_id,
+                                            pointer_t<XNKEY> exchange_key) {
+  if (key_id) {
+    std::lock_guard<std::mutex> lock(xnaddr_mutex);
+    registered_key = *key_id;
+    key_registered = true;
+    if (systemlink::Enabled()) {
+      XELOGI("System link: title registered session key {:02X}{:02X}..",
+             key_id->ab[0], key_id->ab[1]);
+    }
+  }
   return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetRegisterKey, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetRegisterKey, kNetworking, kImplemented);
 
 dword_result_t NetDll_XNetUnregisterKey_entry(dword_t caller,
-                                              lpdword_t key_id) {
+                                              pointer_t<XNKID> key_id) {
+  std::lock_guard<std::mutex> lock(xnaddr_mutex);
+  if (key_id && key_registered &&
+      !std::memcmp(key_id->ab, registered_key.ab, sizeof(registered_key.ab))) {
+    registered_key = {};
+    key_registered = false;
+  }
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterKey, kNetworking, kStub);
