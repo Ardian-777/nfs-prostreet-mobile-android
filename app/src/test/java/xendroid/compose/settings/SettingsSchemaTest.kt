@@ -16,22 +16,23 @@ class SettingsSchemaTest {
     // 146 before the redesign, plus the 29 cvars of the core it shows now (docs/ui-redesign/README.md),
     // less APU|mute and GPU|readback_memexport, which the core never defined (ajustes-2.md).
     // Display|host_present_from_non_ui_thread is intentionally absent (forced true natively).
-    // Plus adds Vulkan|zerofg_mode, in its own ZeroFG section: 174.
-    @Test fun total_entry_count_is_174() {
-        assertEquals(174, all.size)
+    // Plus adds Vulkan|zerofg_mode, in its own ZeroFG section, and System link's Network|systemlink and
+    // Network|systemlink_peers: 176.
+    @Test fun total_entry_count_is_176() {
+        assertEquals(176, all.size)
         assertEquals(
-            174,
+            176,
             all.count { it is Setting.Bool } + all.count { it is Setting.IntRange } +
                 all.count { it is Setting.ListChoice } + all.count { it is Setting.Action } + all.count { it is Setting.Text },
         )
     }
 
     @Test fun counts_by_type_match_verified_inventory() {
-        assertEquals(119, all.count { it is Setting.Bool })        // 103 + 18 new - 2 the core never had
+        assertEquals(120, all.count { it is Setting.Bool })        // 103 + 18 new - 2 the core never had + systemlink
         assertEquals(20, all.count { it is Setting.IntRange })     // 14 + 6 new
         assertEquals(31, all.count { it is Setting.ListChoice })   // 27 + 3 new + zerofg_mode
         assertEquals(2, all.count { it is Setting.Action })
-        assertEquals(2, all.count { it is Setting.Text })          // launch_module, cl
+        assertEquals(3, all.count { it is Setting.Text })          // launch_module, cl, systemlink_peers
     }
 
     /** The cvars the redesign shows, with the section, type and default the core defines them with. */
@@ -85,7 +86,7 @@ class SettingsSchemaTest {
 
     @Test fun categories_present_in_legacy_order() {
         val expected = listOf(
-            "ZeroFG", "Vulkan", "Video", "UI", "Storage", "Kernel", "Controller", "HID", "Memory", "XConfig",
+            "ZeroFG", "Vulkan", "Video", "UI", "Storage", "Kernel", "Network", "Controller", "HID", "Memory", "XConfig",
             "Display", "GPU", "CPU", "Logging", "Content", "General", "APU",
         )
         assertEquals(expected, SettingsSchema.categories.map { it.title })
