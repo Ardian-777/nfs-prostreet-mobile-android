@@ -27,6 +27,7 @@ import xendroid.compose.core.EmuProcessLink
 import xendroid.compose.core.EmulatorRuntime
 import xendroid.compose.core.FrontendLaunch
 import xendroid.compose.core.EmulatorSession
+import xendroid.compose.core.ZeroFgMode
 import xendroid.compose.core.ScreenBrightnessSampler
 import xendroid.compose.core.SessionLogs
 import xendroid.compose.core.HudMetric
@@ -128,7 +129,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val TOUCH_KEY = "HID|show_touch_overlay"
         private const val VOLUME_KEY = "APU|volume"
         private const val IMAGE_LIVE = "image"
-        private val MENU_CONFIG_KEYS = listOf(FPS_KEY, SCALING_KEY, AA_KEY, CAS_KEY, DITHER_KEY, TOUCH_KEY, VOLUME_KEY) +
+        private const val ZEROFG_KEY = "Vulkan|zerofg_mode"
+        private val MENU_CONFIG_KEYS = listOf(FPS_KEY, SCALING_KEY, AA_KEY, CAS_KEY, DITHER_KEY, TOUCH_KEY, VOLUME_KEY, ZEROFG_KEY) +
             xendroid.compose.core.GpuLiveOption.entries.map { it.key }
         private val FPS_CHOICES = listOf(0, 30, 45, 60, 90, 120)
         private val HUD_DETAILS = listOf(xendroid.compose.core.HudDetail.COMPACT, xendroid.compose.core.HudDetail.FULL,
@@ -184,6 +186,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private val session = EmulatorSession()
+    private val zeroFgMode = mutableStateOf(ZeroFgMode.OFF)
+    private val zeroFgDisplayVote = xendroid.compose.core.ZeroFgDisplayVote()
+    private var zeroFgSurfaceGeneration = 0
+    private val zeroFgActive = mutableStateOf(false)
     /** Durable record of this guest run (sessions/SessionRunStore); null if unavailable. */
     @Volatile private var runId: String? = null
     private var lastRunHeartbeatMs = 0L
@@ -920,10 +926,11 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         val effect = scalingEffect.intValue
         val image = listOfNotNull(
             if (effect < 0) getString(R.string.menu_scaling_inherited)
-            else listOf("Bilinear", "CAS", "FSR", "SGSR", "Lanczos", "CRT").getOrNull(effect),
+            else listOf("Bilinear", "CAS", "FSR", "SGSR", "Lanczos", "CRT", "SGSR1 Edge Direction").getOrNull(effect),
             xendroid.compose.core.PerformancePanel.resolutionScale(changed)?.let { getString(R.string.panel_resolution, it) },
         ).joinToString(" · ")
         val frameGeneration = when {
+            zeroFgMode.value != ZeroFgMode.OFF -> zeroFgStatus()
             !fg.requested -> getString(R.string.menu_off)
             fg.engine == 1 -> "LSFG ×${fg.multiplier}"
             else -> "Win-FG"
@@ -1435,6 +1442,27 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                             Configuration.ORIENTATION_LANDSCAPE
 
                     val booted by bootedState
+
+                    // Main Surface Authority: follow the actual native owner, not the requested mode.
+                    LaunchedEffect(booted) {
+                        if (!booted) return@LaunchedEffect
+                        while (isActive) {
+                            zeroFgMode.value = session.zeroFgMode()
+                            val active = session.zeroFgMainSurfaceActive()
+                            zeroFgDisplayVote.update(active,
+                                externalDisplay?.outputSurfaceView ?: surfaceView,
+                                externalDisplay?.outputWindow ?: window, zeroFgSurfaceGeneration)
+                            if (zeroFgActive.value && !active) {
+                                val legacy = session.presentationState()
+                                // Restore the exact legacy request after releasing B's vote,
+                                // including a manual refresh or a target chosen while paused.
+                                if (legacy.requested) selectRefresh(this@EmulatorHostActivity, legacy.hz)
+                                else releaseFrameGenerationRefresh()
+                            }
+                            zeroFgActive.value = active
+                            delay(100)
+                        }
+                    }
 
                     val playingTitle by activeTitleState
                     val controls =
@@ -2212,6 +2240,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         holder: SurfaceHolder
     ) {
         if (externalDisplay?.owns(holder) == false) return
+        ++zeroFgSurfaceGeneration
         surfaceAvailable = true
         recordEvent("surface", if (started) "recreated" else "created, booting the core")
         if (!started) {
@@ -2288,6 +2317,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         holder: SurfaceHolder
     ) {
         if (externalDisplay?.owns(holder) == false) return
+        zeroFgDisplayVote.release()
+        ++zeroFgSurfaceGeneration
         surfaceAvailable = false
         if (!started) return
         recordEvent("surface", "destroyed", flush = true)
@@ -2367,6 +2398,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        zeroFgDisplayVote.release()
         gameModeSignal.update(xendroid.compose.core.GamePhase.NONE)
         runCatching { multicastLock?.release() }
         multicastLock = null
@@ -3127,6 +3159,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         (if (Build.VERSION.SDK_INT >= 30) display?.refreshRate else windowManager.defaultDisplay.refreshRate) ?: 60f
 
     private fun frameGenerationNotes(state: PresentationState): List<String> {
+        if (zeroFgMode.value != ZeroFgMode.OFF) return listOf(zeroFgStatus())
         val hz = currentOutputHz()
         return if (state.requested && state.state == 2) {
             xendroid.compose.core.FrameGenerationReadout.running(lastGuestFps, generatedPerSecond,
@@ -3219,8 +3252,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             InGameAction.DISPLAY_MODE to MenuValue(options = listOf(R.string.menu_opt_fit, R.string.menu_opt_fill, R.string.menu_opt_stretch,
                 R.string.menu_opt_integer).map { stringResource(it) }, selected = presentation.displayMode.coerceAtLeast(0),
                 own = InGameChanges.DISPLAY_MODE in own),
-            InGameAction.SCALING_EFFECT to MenuValue(text = listOf(fromSettings, "Bilinear", "CAS", "FSR", "SGSR", "Lanczos", "CRT")
-                [(scalingEffect.intValue + 1).coerceIn(0, 6)], own = SCALING_KEY in own),
+            InGameAction.SCALING_EFFECT to MenuValue(text = listOf(fromSettings, "Bilinear", "CAS", "FSR", "SGSR", "Lanczos", "CRT", "SGSR1 Edge Direction")
+                [(scalingEffect.intValue + 1).coerceIn(0, 7)], own = SCALING_KEY in own),
             InGameAction.ANTIALIASING to MenuValue(text = when (image.antialiasing) {
                 0 -> off; 1 -> "FXAA"; 2 -> stringResource(R.string.menu_aa_fxaa_extreme); else -> fromSettings
             }, own = AA_KEY in own),
@@ -3247,6 +3280,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                     xendroid.compose.driver.DriverIdentity.InGame.OTHER_FOR_NEXT_START -> stringResource(R.string.menu_driver_next, label)
                 }
             }),
+            InGameAction.ZEROFG to MenuValue(options = listOf(off,
+                stringResource(R.string.menu_zerofg_reallyzero), stringResource(R.string.menu_zerofg_zero)),
+                selected = zeroFgMode.value.value, own = ZEROFG_KEY in own,
+                note = if (zeroFgMode.value != ZeroFgMode.OFF) zeroFgStatus() else null),
             InGameAction.WINFG to MenuValue(on = presentation.requested && presentation.engine == 0),
             InGameAction.WINFG_PRESET to MenuValue(text = stringResource(listOf(R.string.menu_preset_quality, R.string.menu_preset_balanced,
                 R.string.menu_preset_performance)[fgPreset.intValue.coerceIn(0, 2)])),
@@ -3530,6 +3567,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     /** Round 2: a pill or a chip of the menu chosen by touch (or a choice's next by A). */
     private fun chooseMenuOption(action: InGameAction, index: Int) {
         when (action) {
+            InGameAction.ZEROFG -> setZeroFgMode(ZeroFgMode.fromValue(index))
             InGameAction.DISPLAY_MODE -> setDisplayMode(index.coerceIn(0, 3))
             InGameAction.FPS_LIMIT -> FPS_CHOICES.getOrNull(index)?.let(::setMenuFps)
             InGameAction.HUD_LAYOUT -> updateHudStyle { it.copy(layout = xendroid.compose.core.HudLayout.entries[index.coerceIn(0, 1)]) }
@@ -3574,6 +3612,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun choiceIndex(action: InGameAction): Int = when (action) {
+        InGameAction.ZEROFG -> zeroFgMode.value.value
         InGameAction.DISPLAY_MODE -> presentationState.value.displayMode.coerceIn(0, 3)
         InGameAction.FPS_LIMIT -> FPS_CHOICES.indexOf(fpsLimitState.intValue).coerceAtLeast(0)
         InGameAction.HUD_LAYOUT -> hudStyle.value.layout.ordinal
@@ -3585,6 +3624,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun choiceCount(action: InGameAction): Int = when (action) {
+        InGameAction.ZEROFG -> 3
         InGameAction.DISPLAY_MODE -> 4
         InGameAction.FPS_LIMIT -> FPS_CHOICES.size
         InGameAction.HUD_STYLE -> HUD_DETAILS.size
@@ -3636,7 +3676,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             InGameAction.SHADING_RATE -> setGpuLive(xendroid.compose.core.GpuLiveOption.SHADING_RATE, around((0..3).toList(), gpuValue(xendroid.compose.core.GpuLiveOption.SHADING_RATE)))
             InGameAction.SCALING_EFFECT -> {
                 rememberLive(SCALING_KEY, scalingEffect.intValue)
-                scalingEffect.intValue = around((-1..5).toList(), scalingEffect.intValue)
+                scalingEffect.intValue = around((-1..6).toList(), scalingEffect.intValue)
                 session.setScalingEffect(scalingEffect.intValue)
                 keepChange(SCALING_KEY, xendroid.compose.core.ImageTuning.scalingValue(scalingEffect.intValue))
             }
@@ -3703,6 +3743,34 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
+    private fun zeroFgStatus(): String {
+        val name = getString(if (zeroFgMode.value == ZeroFgMode.REALLY_ZERO)
+            R.string.menu_zerofg_reallyzero else R.string.menu_zerofg_zero)
+        return getString(if (zeroFgActive.value) R.string.menu_zerofg_active else R.string.menu_zerofg_requested, name)
+    }
+
+    /** The render thread owns draining and switching engines; this only publishes the request. */
+    private fun setZeroFgMode(mode: ZeroFgMode, keep: Boolean = true) {
+        if (keep) rememberLive(ZEROFG_KEY, session.zeroFgMode())
+        if (mode != ZeroFgMode.OFF) {
+            restoreGenerationCap()
+            releaseFrameGenerationRefresh()
+        }
+        session.setZeroFgMode(mode)
+        zeroFgMode.value = session.zeroFgMode()
+        presentationState.value = session.presentationState()
+        if (keep) keepChange(ZEROFG_KEY, mode.key)
+        recordEvent("zerofg", "${mode.key} requested")
+    }
+
+    private fun noteZeroFgStoppedForLegacy(previous: ZeroFgMode, enabled: Boolean) {
+        zeroFgMode.value = session.zeroFgMode()
+        if (enabled && previous != ZeroFgMode.OFF) {
+            rememberLive(ZEROFG_KEY, previous)
+            keepChange(ZEROFG_KEY, ZeroFgMode.OFF.key)
+        }
+    }
+
     /** Frame generation by LSFG: on or off, a multiplier by hand or an output target (15d). */
     private fun runLsfg(action: InGameAction) {
         when (action) {
@@ -3736,7 +3804,9 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             plan != null -> prepareExactCap(plan.cap)
             else -> prepareGenerationCap(hz, lsfgMultiplier.intValue)
         }
+        val previousZeroFgMode = session.zeroFgMode()
         session.setLsfg(enabled, cache, hz, lsfgMultiplier.intValue)
+        noteZeroFgStoppedForLegacy(previousZeroFgMode, enabled)
         if (enabled) recordEvent("lsfg", plan?.let { "target ${it.target}/s: ${it.multiplier}x from ${it.cap} FPS" }
             ?: "${lsfgMultiplier.intValue}x by hand")
         presentationState.value = session.presentationState()
@@ -3749,7 +3819,9 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         val enabled = if (action == InGameAction.WINFG) !(state.requested && state.engine == 0) else state.requested
         val hz = if (enabled) frameGenerationRefresh(guestFpsNow() * 2) else currentOutputHz()
         if (enabled) prepareGenerationCap(hz) else { restoreGenerationCap(); releaseFrameGenerationRefresh() }
+        val previousZeroFgMode = session.zeroFgMode()
         session.setFrameGeneration(enabled, fgPreset.intValue, hz)
+        noteZeroFgStoppedForLegacy(previousZeroFgMode, enabled)
         presentationState.value = session.presentationState()
     }
 
@@ -3958,6 +4030,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun restoreLive(key: String, value: Any?) {
         when (key) {
+            ZEROFG_KEY -> (value as? ZeroFgMode)?.let { setZeroFgMode(it, keep = false) }
             FPS_KEY -> (value as? Int)?.let { generationCap.forget(); session.setFpsLimit(it); fpsLimitState.intValue = session.fpsLimit() }
             SCALING_KEY -> (value as? Int)?.let { scalingEffect.intValue = it; session.setScalingEffect(it) }
             IMAGE_LIVE -> (value as? xendroid.compose.core.ImageTuning)?.let { imageTuning.value = it; session.setImageTuning(it) }

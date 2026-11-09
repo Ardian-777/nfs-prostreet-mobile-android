@@ -14,7 +14,12 @@
 #include <iterator>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+
+DEFINE_bool(vulkan_completion_wait_telemetry, false,
+            "Log existing host completion/submit telemetry without extra GPU polls.",
+            "Vulkan");
 
 namespace xe {
 namespace ui {
@@ -136,7 +141,10 @@ VulkanGPUCompletionTimeline::AcquireFenceForSubmission(
 
 VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
     const uint32_t queue_family_index, const uint32_t queue_index,
-    const uint32_t submit_count, const VkSubmitInfo* const submits) {
+    const uint32_t submit_count, const VkSubmitInfo* const submits,
+    uint64_t* queue_lock_wait_ns_out, uint64_t* submit_host_ns_out) {
+  if (queue_lock_wait_ns_out) *queue_lock_wait_ns_out = 0;
+  if (submit_host_ns_out) *submit_host_ns_out = 0;
   VkResult fence_acquire_result;
   std::optional<FenceAcquisition> fence_acquisition =
       AcquireFenceForSubmission(&fence_acquire_result);
@@ -145,12 +153,18 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
   }
 
   VkResult submit_result;
+  const bool measure_host = queue_lock_wait_ns_out || submit_host_ns_out;
+  const uint64_t queue_begin_ns = measure_host ? TimelineNowNs() : 0;
   {
     const VulkanDevice::Queue::Acquisition queue_acquisition =
         vulkan_device_->AcquireQueue(queue_family_index, queue_index);
+    const uint64_t submit_begin_ns = measure_host ? TimelineNowNs() : 0;
+    if (queue_lock_wait_ns_out)
+      *queue_lock_wait_ns_out = submit_begin_ns - queue_begin_ns;
     submit_result = vulkan_device_->SubmitAndUpdateLost(
         queue_acquisition.queue(), submit_count, submits,
         fence_acquisition->GetFenceForSubmitting());
+    if (submit_host_ns_out) *submit_host_ns_out = TimelineNowNs() - submit_begin_ns;
   }
   if (submit_result != VK_SUCCESS) {
     fence_acquisition->SetSubmissionFailedOrAborted();

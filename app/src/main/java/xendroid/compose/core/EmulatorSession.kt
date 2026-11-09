@@ -209,6 +209,12 @@ class EmulatorSession {
     fun setFatalReportPath(path: String?) = core.set_fatal_report_path(path)
     fun presenterWork(): LongArray = if (booted) core.presenter_work() else longArrayOf(0, 0, 0)
     fun setFrameGeneration(enabled: Boolean, preset: Int, hz: Float) { if (booted) core.set_frame_generation(enabled, preset, hz) }
+    /** Requested mode; the native presenter drains and switches on its own thread. */
+    fun zeroFgMode(): ZeroFgMode = if (booted) ZeroFgMode.fromValue(core.zerofg_mode()) else ZeroFgMode.OFF
+    fun setZeroFgMode(mode: ZeroFgMode) { if (booted) core.set_zerofg_mode(mode.value) }
+    fun zeroFgMainSurfaceActive(): Boolean = booted && core.zerofg_main_surface_active()
+    /** Rate of outputs delivered by the native presenter, not inferred from a multiplier. */
+    fun outputFps(): Double = if (booted) core.output_fps() else 0.0
     fun setLsfg(enabled: Boolean, cache: String, hz: Float, multiplier: Int = 2) {
         if (booted) core.set_lsfg(enabled, cache, hz, multiplier.coerceIn(2, 4))
     }

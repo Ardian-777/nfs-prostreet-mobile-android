@@ -127,7 +127,9 @@ class VulkanGPUCompletionTimeline : public GPUCompletionTimeline {
 
   VkResult AcquireFenceAndSubmit(uint32_t queue_family_index,
                                  uint32_t queue_index, uint32_t submit_count,
-                                 const VkSubmitInfo* submits);
+                                 const VkSubmitInfo* submits,
+                                 uint64_t* queue_lock_wait_ns_out = nullptr,
+                                 uint64_t* submit_host_ns_out = nullptr);
 
   void UpdateCompletedSubmission() override;
 

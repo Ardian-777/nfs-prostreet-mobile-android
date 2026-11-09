@@ -72,12 +72,17 @@ aparelhos reais.
 - **HUD de desempenho** (FPS, tempo de quadro, CPU, GPU, RAM, temperaturas) e limite de
   FPS por jogo (ilimitado, ou de 30 a 120 FPS).
 - **Escala e nitidez da imagem**, incluindo o Snapdragon Game Super Resolution.
+- **SGSR1 Edge Direction**, junto do SGSR1 existente, nas configurações e no menu
+  de Imagem durante o jogo; o filtro padrão permanece igual.
 - **Gerenciador de drivers** Adreno/Turnip, global ou por jogo, com verificação SHA-256.
 - **Histórico de jogo** com percentis do tempo de quadro, pacote de diagnóstico para
   compartilhar, notas de compatibilidade locais e perfis de ajustes da comunidade.
 - **Geração de quadros** (experimental, desligada por padrão): Win-FG e LSFG (com o seu
   próprio `Lossless.dll`) transformam um jogo a 30 fps em 60 na tela, e o HUD mostra
   as duas taxas.
+- **ZeroFG** oferece Zero (qualidade) e ReallyZero (menor custo), com seletor
+  Off/ReallyZero/Zero durante o jogo. Vem desligado e exige um caminho Vulkan 1.3
+  qualificado; veja as [notas de integração e validação](docs/ZEROFG.md).
 
 ## Desempenho
 

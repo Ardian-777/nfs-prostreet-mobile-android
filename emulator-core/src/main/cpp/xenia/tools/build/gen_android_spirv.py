@@ -275,11 +275,19 @@ def main():
     for shader_dir in dirs:
         shader_dir = os.path.abspath(shader_dir)
         out_dir = os.path.join(shader_dir, "bytecode", "vulkan_spirv")
+        # Entry timestamps alone miss edits to their shared shader bodies.
+        # This is conservative, as for the direct-host-resolve variants below.
+        newest_shared = max(
+            (os.path.getmtime(os.path.join(shader_dir, name))
+             for name in os.listdir(shader_dir)
+             if name.endswith((".xesli", ".glsli", ".hlsli"))),
+            default=0.0)
         for ident, src in sorted(collect(shader_dir).items()):
             if is_dxil_only(src):
                 continue
             out = os.path.join(out_dir, ident + ".h")
-            if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+            if (os.path.exists(out) and
+                    os.path.getmtime(out) >= max(os.path.getmtime(src), newest_shared)):
                 skipped += 1
                 continue
             r = subprocess.run([sys.executable, COMPILE, src, out],

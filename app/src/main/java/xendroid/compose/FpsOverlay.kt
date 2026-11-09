@@ -52,6 +52,8 @@ import xendroid.compose.core.HudPlacement
 import xendroid.compose.core.HudPlacements
 import xendroid.compose.core.HudStyle
 import xendroid.compose.core.KgslMemory
+import xendroid.compose.core.ZeroFgHudReadout
+import xendroid.compose.core.ZeroFgMode
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.foundation.layout.Arrangement
@@ -67,6 +69,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.em
 import androidx.compose.foundation.Canvas
@@ -248,13 +251,15 @@ internal data class HudSample(
     val gpuMemory: Long? = null,
     /** With frame generation on: the frames per second reaching the screen (the game's and the generated ones). */
     val fgFps: Double? = null,
+    val zeroFg: ZeroFgHudReadout? = null,
 )
 
 /** The rows that need the battery's readings. */
 private val POWER_METRICS = setOf(HudMetric.POWER, HudMetric.BATTERY_LEVEL, HudMetric.BATTERY_TIME)
 
 /** A row of the HUD: what is measured and its value; [tone] colours the value. */
-private data class HudLine(val label: String, val value: AnnotatedString, val tone: HudTone = HudTone.NORMAL, val metric: HudMetric? = null)
+private data class HudLine(val label: String, val value: AnnotatedString, val tone: HudTone = HudTone.NORMAL,
+                           val metric: HudMetric? = null, val wrapValue: Boolean = false)
 
 private val HudText = Color.White.copy(alpha = 0.92f)
 private val HudLabel = Color.White.copy(alpha = 0.62f)
@@ -329,6 +334,7 @@ fun FpsOverlay(
     var power by remember { mutableStateOf<PowerReading?>(null) }
     var gpuMemory by remember { mutableStateOf<Long?>(null) }
     var fgFps by remember { mutableStateOf<Double?>(null) }
+    var zeroFg by remember { mutableStateOf<ZeroFgHudReadout?>(null) }
     val batteryEstimate = remember { BatteryTimeEstimate() }
 
     LaunchedEffect(pollHz, compact, metrics) {
@@ -356,8 +362,13 @@ fun FpsOverlay(
             if (generatedNs - previousGeneratedNs >= 1_000_000_000L) {
                 val state = runCatching { session.presentationState() }.getOrNull()
                 val active = state != null && state.requested && state.state == 2
-                fgFps = if (active && previousGenerated >= 0 && state!!.generated >= previousGenerated)
-                    currentFps + (state.generated - previousGenerated) * 1e9 / (generatedNs - previousGeneratedNs) else null
+                val zeroFgOutputActive = session.zeroFgMainSurfaceActive()
+                val zeroFgSample = ZeroFgHudReadout(session.zeroFgMode(), zeroFgOutputActive,
+                    if (zeroFgOutputActive) session.outputFps() else null)
+                zeroFg = zeroFgSample
+                fgFps = if (zeroFgOutputActive) zeroFgSample.measuredOutputFps
+                    else if (active && previousGenerated >= 0 && state!!.generated >= previousGenerated)
+                        currentFps + (state.generated - previousGenerated) * 1e9 / (generatedNs - previousGeneratedNs) else null
                 previousGenerated = if (active) state!!.generated else -1L
                 previousGeneratedNs = generatedNs
             }
@@ -455,7 +466,7 @@ fun FpsOverlay(
         }
     }
 
-    val sample = HudSample(fps, frameMs, presentSubmissionsPerSecond, cpu, gpu, ramUsed, ramTotal, batTemp, socTemp, power, gpuMemory, fgFps)
+    val sample = HudSample(fps, frameMs, presentSubmissionsPerSecond, cpu, gpu, ramUsed, ramTotal, batTemp, socTemp, power, gpuMemory, fgFps, zeroFg)
     val graph = if (style.graph) history else null
     if (style.layout == HudLayout.HORIZONTAL) {
         // Round 2: a bar along the top or the bottom; a pinch sizes it, kept for this game.
@@ -517,6 +528,21 @@ private fun hudLines(sample: HudSample, metrics: Set<HudMetric>): List<HudLine> 
             withStyle(SpanStyle(color = HudLabel)) { append(" · ") }
             append(fmt("%.1f ms", sample.frameMs))
         }, HudTone.GOOD, null))
+        sample.zeroFg?.takeIf { it.visible }?.let { zeroFg ->
+            val requested = stringResource(when (zeroFg.requested) {
+                ZeroFgMode.OFF -> R.string.menu_off
+                ZeroFgMode.REALLY_ZERO -> R.string.menu_zerofg_reallyzero
+                ZeroFgMode.ZERO -> R.string.menu_zerofg_zero
+            })
+            val status = stringResource(if (zeroFg.outputActive) R.string.hud_zerofg_output_active
+                else R.string.hud_zerofg_waiting)
+            val rate = zeroFg.measuredOutputFps?.let {
+                stringResource(R.string.hud_zerofg_output_rate, fmt("%.0f", it))
+            }
+            add(HudLine("ZeroFG", AnnotatedString(listOfNotNull(
+                stringResource(R.string.hud_zerofg_requested, requested), status, rate,
+            ).joinToString(" · ")), wrapValue = true))
+        }
         if (HudMetric.HOST_SUBMISSIONS in metrics) sample.submissionsPerSecond?.let {
             add(HudLine(stringResource(R.string.xd_hud_vulkan), AnnotatedString(perSecond.format(fmt("%.0f", it))), metric = HudMetric.HOST_SUBMISSIONS))
         }
@@ -666,7 +692,7 @@ internal fun HudBar(
     modifier: Modifier = Modifier,
 ) {
     val text = hudTextStyle(look, baseFontSizeSp, scale)
-    val lines = hudLines(sample, if (detail == HudDetail.COMPACT) emptySet() else metrics)
+    val lines = if (detail == HudDetail.COMPACT) hudLines(sample, emptySet()).take(1) else hudLines(sample, metrics)
     val bar: @Composable () -> Unit = {
         Row(
             Modifier.padding(top = if (style.edge == HudEdge.TOP) (4 * scale).dp else 0.dp, bottom = if (style.edge == HudEdge.BOTTOM) (4 * scale).dp else 0.dp)
@@ -726,7 +752,10 @@ private fun FpsGraph(samples: List<Float>, colors: Float, modifier: Modifier) {
 private fun HudRow(line: HudLine, style: TextStyle, scale: Float, colors: Float) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(line.label, style = style, color = labelColor(line, colors), maxLines = 1)
-        Text(line.value, style = style, color = valueColor(line, colors), maxLines = 1, modifier = Modifier.padding(start = (14 * scale).dp))
+        Text(line.value, style = style, color = valueColor(line, colors),
+            maxLines = if (line.wrapValue) Int.MAX_VALUE else 1,
+            textAlign = if (line.wrapValue) TextAlign.End else null,
+            modifier = (if (line.wrapValue) Modifier.weight(1f) else Modifier).padding(start = (14 * scale).dp))
     }
 }
 

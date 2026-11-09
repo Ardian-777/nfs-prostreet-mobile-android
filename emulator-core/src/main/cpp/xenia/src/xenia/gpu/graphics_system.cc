@@ -9,6 +9,9 @@
 
 #include "xenia/gpu/graphics_system.h"
 
+#include <algorithm>
+#include <chrono>
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -24,6 +27,15 @@
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
+
+DEFINE_uint32(
+    zerofg_fps_limit, 0,
+    "With ZeroFG on, a frame rate cap for the game (0 = off): its swaps are "
+    "held at least 1/limit apart, and a frame waiting for its flip that long "
+    "after the previous one gets the next vblank at once. The game still sees "
+    "one vblank per period, so it never speeds up; a game whose logic runs per "
+    "frame plays slower under a cap below its own rate.",
+    "Vulkan");
 
 DEFINE_uint32(internal_display_resolution, 8,
               "Allow games that support different resolutions to render "
@@ -167,6 +179,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
             // K11: absolute deadlines on the guest clock, tested on the host.
             VblankPacer pacer;
             pacer.Start(Clock::QueryGuestTickCount());
+            bool vblank_borrowed = false;
             constexpr double duration_scalar = 1.0;
 #endif
 
@@ -214,17 +227,46 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
 #endif
                 }
 #elif XE_PLATFORM_LINUX
-                // Absolute-deadline pacing: the anchor moves by whole
-                // intervals and only the remainder is slept. Sleeping a full
-                // period let oversleep accumulate, sagging the vblank rate
-                // toward half on a loaded device. More than one interval
-                // behind, it resyncs instead of firing a burst of catch-up
-                // vblanks (VblankPacer).
+                // Keep Plus's absolute grid (including remainder and stall
+                // recovery). A live ZeroFG pull may borrow the next grid point;
+                // the next step.fire repays it instead of raising a second ISR.
                 const uint64_t tick_freq = Clock::guest_tick_frequency();
-                const VblankPacer::Step step = pacer.Advance(
-                    Clock::QueryGuestTickCount(), tick_freq, vblank_hz);
+                const uint64_t current_time = Clock::QueryGuestTickCount();
+                const VblankPacer::Step step =
+                    pacer.Advance(current_time, tick_freq, vblank_hz);
+                const bool pull_live = command_processor_ &&
+                    command_processor_->GuestVblankPullActive() &&
+                    !paused_.load(std::memory_order_seq_cst);
+                const uint64_t pull_spacing_ticks = tick_freq / 250;
+                bool pull_waiting = false;
+                bool raised_regular = false;
                 if (step.fire) {
-                  MarkVblank();
+                  if (vblank_borrowed) {
+                    // This point was already delivered by a pulled vblank.
+                    vblank_borrowed = false;
+                  } else {
+                    MarkVblank();
+                    TakeVblankPull();
+                    raised_regular = true;
+                  }
+                }
+                if (!pull_live) {
+                  TakeVblankPull();
+                } else if (!raised_regular && !vblank_borrowed &&
+                           TakeVblankPull()) {
+                  const uint64_t last_vblank =
+                      last_vblank_guest_tick_.load(std::memory_order_acquire);
+                  if (last_vblank && current_time >= last_vblank &&
+                      current_time - last_vblank < pull_spacing_ticks) {
+                    std::lock_guard<std::mutex> lock(vblank_pull_mutex_);
+                    vblank_pull_requested_ = true;
+                    pull_waiting = true;
+                  } else {
+                    vblank_borrowed = true;
+                    vblank_pull_fired_total_.fetch_add(
+                        1, std::memory_order_relaxed);
+                    MarkVblank(true);
+                  }
                 }
                 if (step.rebased &&
                     (pacer.rebases() & (pacer.rebases() - 1)) == 0) {
@@ -233,16 +275,29 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                       "vblanks not raised)",
                       pacer.rebases(), pacer.dropped());
                 }
-                // Sleep only until the next deadline, precisely: the plain
-                // NanoSleep quantum overshoot is exactly what starved the
-                // cadence.
                 {
                   const uint64_t now = Clock::QueryGuestTickCount();
-                  if (step.next_deadline > now) {
-                    const uint64_t remain_ticks = step.next_deadline - now;
+                  uint64_t next = step.next_deadline;
+                  if (pull_waiting) {
+                    next = std::min(
+                        next,
+                        last_vblank_guest_tick_.load(std::memory_order_acquire) +
+                            pull_spacing_ticks);
+                  }
+                  if (next > now) {
                     const uint64_t remain_ns = static_cast<uint64_t>(
-                        remain_ticks * (1000000000.0 / tick_freq));
-                    threading::NanoSleepPrecise(remain_ns);
+                        (next - now) * (1000000000.0 / tick_freq));
+                    if (pull_live) {
+                      std::unique_lock<std::mutex> lock(vblank_pull_mutex_);
+                      vblank_pull_cv_.wait_for(
+                          lock, std::chrono::nanoseconds(remain_ns), [&] {
+                            return vblank_pull_requested_ && !pull_waiting &&
+                                   !vblank_borrowed;
+                          });
+                    } else {
+                      // The native path retains its precise-deadline sleep.
+                      threading::NanoSleepPrecise(remain_ns);
+                    }
                   }
                 }
 #endif
@@ -437,7 +492,22 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
                                         interrupt_callback_data_, source, cpu);
 }
 
-void GraphicsSystem::MarkVblank() {
+void GraphicsSystem::RequestVblankPull() {
+  {
+    std::lock_guard<std::mutex> lock(vblank_pull_mutex_);
+    vblank_pull_requested_ = true;
+  }
+  vblank_pull_cv_.notify_one();
+}
+
+bool GraphicsSystem::TakeVblankPull() {
+  std::lock_guard<std::mutex> lock(vblank_pull_mutex_);
+  const bool requested = vblank_pull_requested_;
+  vblank_pull_requested_ = false;
+  return requested;
+}
+
+void GraphicsSystem::MarkVblank(bool pulled) {
   SCOPE_profile_cpu_f("gpu");
 
   // No guest vblank ISR while paused (a halted GPU raises no interrupts).
@@ -450,9 +520,10 @@ void GraphicsSystem::MarkVblank() {
     const uint64_t now = Clock::QueryGuestTickCount();
     const uint64_t prev =
         last_vblank_guest_tick_.exchange(now, std::memory_order_acq_rel);
-    if (prev && now > prev) {
+    if (prev && now > prev && !pulled && !vblank_skip_period_sample_) {
       vblank_period_ticks_.store(now - prev, std::memory_order_release);
     }
+    vblank_skip_period_sample_ = pulled;
 
     // Increment vblank counter (so the game sees us making progress).
     command_processor_->increment_counter();

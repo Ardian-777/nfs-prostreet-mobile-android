@@ -39,6 +39,7 @@ enum class InGameAction(val kind: RowKind) {
     TV_MARGIN(RowKind.CYCLE),
     /** U01: the driver the game runs on, against the one selected (read-only). */
     DRIVER_INFO(RowKind.INFO),
+    ZEROFG(RowKind.CHOICE),
     WINFG(RowKind.TOGGLE), WINFG_PRESET(RowKind.CYCLE), LSFG(RowKind.TOGGLE),
     LSFG_MULTIPLIER(RowKind.CYCLE),
     /** 15d: LSFG by an output target (60/90/120/the display) instead of a multiplier by hand. */
@@ -119,7 +120,7 @@ val inGamePageGroups: Map<InGamePage, List<MenuGroup>> = mapOf(
         MenuGroup(R.string.menu_group_picture, listOf(InGameAction.DISPLAY_MODE, InGameAction.SCALING_EFFECT,
             InGameAction.ANTIALIASING, InGameAction.SHARPNESS, InGameAction.DITHER, InGameAction.COLOR_FILTER, InGameAction.STRETCH)),
         MenuGroup(R.string.menu_group_tv, listOf(InGameAction.EXTERNAL_DISPLAY, InGameAction.TV_MARGIN)),
-        MenuGroup(R.string.menu_group_frame_generation, listOf(InGameAction.WINFG, InGameAction.WINFG_PRESET, InGameAction.LSFG,
+        MenuGroup(R.string.menu_group_frame_generation, listOf(InGameAction.ZEROFG, InGameAction.WINFG, InGameAction.WINFG_PRESET, InGameAction.LSFG,
             InGameAction.LSFG_MULTIPLIER, InGameAction.LSFG_TARGET, InGameAction.IMPORT_LSFG_DLL, InGameAction.CLEAR_LSFG_CACHE)),
         MenuGroup(R.string.menu_group_driver, listOf(InGameAction.DRIVER_INFO)),
     ),

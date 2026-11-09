@@ -69,6 +69,8 @@ and performance and accuracy work measured frame by frame on real hardware.
 - **Performance HUD** (FPS, frame time, CPU, GPU, RAM, temperatures) and per-game
   frame-rate limits (unlimited, or 30 to 120 FPS).
 - **Output scaling and sharpening**, including Snapdragon Game Super Resolution.
+- **SGSR1 Edge Direction**, alongside the existing SGSR1 filter, available from
+  Settings and the in-game Image menu; the default scaling filter is unchanged.
 - **Driver manager** for Adreno/Turnip drivers, global or per game, with SHA-256
   checks.
 - **Play history** with frame-time percentiles, a diagnostics bundle to share,
@@ -76,6 +78,9 @@ and performance and accuracy work measured frame by frame on real hardware.
 - **Frame generation** (experimental, off by default): Win-FG and LSFG (with your own
   `Lossless.dll`) turn a 30 fps game into 60 on the screen, and the HUD shows both
   rates.
+- **ZeroFG** adds Zero (quality) and ReallyZero (lower cost), with an in-game
+  Off/ReallyZero/Zero selector. It is off by default and needs a qualified Vulkan
+  1.3 path; see [integration and validation notes](docs/ZEROFG.md).
 
 ## Performance snapshot
 

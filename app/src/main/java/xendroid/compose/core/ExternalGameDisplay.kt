@@ -35,6 +35,9 @@ class ExternalGameDisplay(
     private var closing = false
     private var detached = false
     val activeDisplay: Display? get() = presentation?.display
+    /** The one output that currently belongs to the native presenter, phone or TV. */
+    val outputSurfaceView: SurfaceView get() = output
+    val outputWindow: android.view.Window get() = presentation?.window ?: activity.window
     fun owns(holder: SurfaceHolder) = holder === output.holder
     init { manager.registerDisplayListener(this, Handler(Looper.getMainLooper())) }
 

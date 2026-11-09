@@ -14,9 +14,9 @@ class SettingCatalogTest {
         assertEquals(SettingsSchema.allSettings.map { it.key }.toSet(), placed.toSet())
     }
 
-    @Test fun essential_is_what_player_mode_showed_plus_volume_and_vibration() {
+    @Test fun essential_keeps_player_settings_plus_volume_vibration_and_zerofg() {
         val essential = SettingCatalog.settings(SettingLevel.ESSENTIAL).map { it.key }.toSet()
-        assertEquals(SettingsSchema.playerKeys.toSet() + setOf("APU|volume", "HID|vibration"), essential)
+        assertEquals(SettingsSchema.playerKeys.toSet() + setOf("APU|volume", "HID|vibration", "Vulkan|zerofg_mode"), essential)
     }
 
     @Test fun levels_nest() {
@@ -59,7 +59,7 @@ class SettingCatalogTest {
 
     @Test fun live_settings_are_the_ones_the_in_game_menu_changes() {
         val live = SettingCatalog.placedKeys.filter { SettingCatalog.meta(it).live }.toSet()
-        assertEquals(setOf("GPU|framerate_limit", "Display|postprocess_scaling_and_sharpening", "HID|show_touch_overlay", "APU|volume"), live)
+        assertEquals(setOf("GPU|framerate_limit", "Display|postprocess_scaling_and_sharpening", "HID|show_touch_overlay", "APU|volume", "Vulkan|zerofg_mode"), live)
     }
 
     @Test fun pins_toggle() {

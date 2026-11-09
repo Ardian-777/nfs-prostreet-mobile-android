@@ -475,6 +475,8 @@ const char* EmulatorWindow::GetCvarValueForGuestOutputPaintEffect(
       return "fsr";
     case ui::Presenter::GuestOutputPaintConfig::Effect::kSgsr:
       return "sgsr";
+    case ui::Presenter::GuestOutputPaintConfig::Effect::kSgsrEdgeDirection:
+      return "sgsr_edge";
     case ui::Presenter::GuestOutputPaintConfig::Effect::kLanczos:
       return "lanczos";
     case ui::Presenter::GuestOutputPaintConfig::Effect::kCrt:
@@ -498,6 +500,10 @@ EmulatorWindow::GetGuestOutputPaintEffectForCvarValue(
   if (cvar_value == GetCvarValueForGuestOutputPaintEffect(
                         ui::Presenter::GuestOutputPaintConfig::Effect::kSgsr)) {
     return ui::Presenter::GuestOutputPaintConfig::Effect::kSgsr;
+  }
+  if (cvar_value == GetCvarValueForGuestOutputPaintEffect(
+                        ui::Presenter::GuestOutputPaintConfig::Effect::kSgsrEdgeDirection)) {
+    return ui::Presenter::GuestOutputPaintConfig::Effect::kSgsrEdgeDirection;
   }
   if (cvar_value == GetCvarValueForGuestOutputPaintEffect(
                         ui::Presenter::GuestOutputPaintConfig::Effect::kLanczos)) {

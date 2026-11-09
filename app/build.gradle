@@ -46,6 +46,7 @@ def engineLicensesDir = layout.buildDirectory.dir('generated/engineLicenseAssets
 def syncEngineLicenses = tasks.register('syncEngineLicenses', Sync) {
     into engineLicensesDir
     into('engine-licenses') {
+        from('../emulator-core/src/main/cpp/zerofg/LICENSE') { rename { 'zerofg-Apache-2.0.txt' } }
         from('../emulator-core/src/main/cpp/third_party/winfg/LICENSE') { rename { 'winfg-MIT.txt' } }
         from('../emulator-core/src/main/cpp/third_party/winfg/THIRD-PARTY.md') { rename { 'winfg-third-party.txt' } }
         from('../emulator-core/src/main/cpp/third_party/winfg/NOTICE_FIDELITYFX_OPTICALFLOW.md') { rename { 'fidelityfx-notice.txt' } }

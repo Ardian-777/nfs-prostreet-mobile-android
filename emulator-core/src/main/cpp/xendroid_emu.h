@@ -20,6 +20,7 @@ public:
     static const uint32_t EVENT_EXECUTE_PENDING_FUNCTIONS = 1u << 0;
     static const uint32_t EVENT_QUIT = 1u << 1;
     static const uint32_t EVENT_PAINT = 1u << 2;
+    static const uint32_t EVENT_FORCE_PAINT = 1u << 3;
     // Generation counters preserving SYNCHRONOUS CallInUIThread semantics:
     // a producer waits until exec_completed >= the ticket it took.
     uint64_t exec_requested = 0;
@@ -37,7 +38,7 @@ public:
 
     void setup_ui_thr_id(std::thread::id id);
 
-    void request_paint();
+    void request_paint(bool force = false);
 
     void main_loop();
 
@@ -61,7 +62,7 @@ protected:
 public:
     void UpdateSurface();   // attach/recreate: OnSurfaceChanged(true)
     void DetachSurface();   // detach only:    OnSurfaceChanged(false)
-    void Paint();
+    void Paint(bool force = false);
 };
 
 class android_menu_item final : public xe::ui::MenuItem {

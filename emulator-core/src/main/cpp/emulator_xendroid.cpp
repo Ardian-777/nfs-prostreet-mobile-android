@@ -23,6 +23,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/frame_stats.h"
 #include "xenia/ui/presentation_runtime.h"
+#include "xenia/ui/vulkan/zerofg_config.h"
 #include "xenia/gpu/gpu_live_options.h"
 #include "third_party/lsfg/lsfg_dll.h"
 #include "xenia/apu/apu_flags.h"
@@ -790,7 +791,7 @@ static const std::pair<std::string,entries> gen_list[]={
         //str
         {"APU|apu",{"nop","aaudio","opensles"}},
         {"Display|postprocess_antialiasing",{"none", "fxaa", "fxaa_extreme"}},
-        {"Display|postprocess_scaling_and_sharpening",{"bilinear", "cas", "fsr"}},
+        {"Display|postprocess_scaling_and_sharpening",{"bilinear", "cas", "fsr", "sgsr", "lanczos", "crt", "sgsr_edge"}},
         {"GPU|gpu",{"vulkan", "null"}},
         {"GPU|render_target_path_vulkan",{"any", "fbo","fsi"}},
         {"HID|hid",{"android", "nop"}},
@@ -1190,7 +1191,7 @@ static void j_set_presentation_mode(JNIEnv* env, jobject thiz, jint mode) {
     if (mode >= -1 && mode <= 3) xe::ui::RuntimePresentation().display_mode = mode;
 }
 static void j_set_scaling_effect(JNIEnv* env, jobject thiz, jint effect) {
-    if (effect >= -1 && effect <= 5) xe::ui::RuntimePresentation().scaling_effect = effect;
+    if (effect >= -1 && effect <= 6) xe::ui::RuntimePresentation().scaling_effect = effect;
 }
 // The in-game menu's Image options (negative: the Settings value), from the next frame.
 static void j_set_image_tuning(JNIEnv* env, jobject thiz, jint antialiasing, jfloat cas_sharpness,
@@ -1307,6 +1308,7 @@ static void j_set_audio_volume(JNIEnv* env, jobject thiz, jint percent) {
 }
 static jint j_audio_volume(JNIEnv* env, jobject thiz) { return ae::EffectiveVolume(); }
 static void j_set_frame_generation(JNIEnv* env, jobject thiz, jboolean enabled, jint preset, jfloat hz) {
+    if (enabled) xe::ui::vulkan::RequestZeroFGMode(0);
     auto& runtime = xe::ui::RuntimePresentation();
     runtime.frame_generation_engine = 0;
     runtime.frame_generation_multiplier = 2;
@@ -1317,9 +1319,70 @@ static void j_set_frame_generation(JNIEnv* env, jobject thiz, jboolean enabled, 
     runtime.configuration_epoch.fetch_add(1);
     runtime.frame_generation_state = enabled ? int(xe::ui::FrameGenerationState::kWarmingUp) : 0;
     runtime.frame_generation_requested = enabled;
+    ae::RequestPresentationRefresh();
     XELOGI("Frame generation: Win-FG {} from the app, preset {}, display {:.1f} Hz", enabled ? "requested" : "off",
            runtime.frame_generation_preset.load(), runtime.display_hz.load());
 }
+// A request only: the presenter owns draining the previous mode and rebuilding it.
+static void j_set_zerofg_mode(JNIEnv* env, jobject thiz, jint mode) {
+    const uint32_t requested = uint32_t(std::clamp(int(mode), 0, 2));
+    if (requested != 0) {
+        auto& runtime = xe::ui::RuntimePresentation();
+        runtime.frame_generation_requested = false;
+        runtime.frame_generation_state = 0;
+        runtime.frame_generation_error = 0;
+        runtime.generation_gpu_ms = -1.0;
+        runtime.configuration_epoch.fetch_add(1);
+    }
+    xe::ui::vulkan::RequestZeroFGMode(requested);
+    ae::RequestPresentationRefresh();
+    XELOGI("ZeroFG: mode {} requested from the app", requested);
+}
+
+static jint j_zerofg_mode(JNIEnv* env, jobject thiz) {
+    return jint(xe::ui::vulkan::RequestedZeroFGMode());
+}
+
+static jboolean j_zerofg_main_surface_active(JNIEnv* env, jobject thiz) {
+    return xe::IsZeroFGMainSurfaceActive() ? JNI_TRUE : JNI_FALSE;
+}
+
+static jdouble j_output_fps(JNIEnv* env, jobject thiz) {
+    const float fps = xe::GetOutputFps();
+    if (xe::IsZeroFGMainSurfaceActive()) {
+        // Compare the exact JNI result with the presenter's existing summary.
+        // A single atomic claim bounds diagnostics across all polling callers.
+        static std::atomic<uint64_t> next_log_ns{0};
+        const uint64_t now_ns = xe::internal::FrameTelemetryNowNs();
+        uint64_t next = next_log_ns.load(std::memory_order_relaxed);
+        if (now_ns >= next && next_log_ns.compare_exchange_strong(
+                next, now_ns + 5000000000ull, std::memory_order_relaxed)) {
+            const uint64_t reset_generation = xe::internal::frame_telemetry_reset_generation().load(
+                std::memory_order_acquire);
+            const auto& ring = xe::internal::final_output_telemetry_ring();
+            const uint64_t sequence = ring.sequence.load(std::memory_order_acquire);
+            uint64_t newest_sequence = 0, newest_generation = 0, newest_timestamp_ns = 0;
+            bool newest_consistent = false;
+            if (sequence) {
+                const auto& slot = ring.slots[(sequence - 1) % xe::internal::kFrameTelemetrySampleCapacity];
+                newest_sequence = slot.sequence.load(std::memory_order_acquire);
+                newest_generation = slot.generation.load(std::memory_order_relaxed);
+                newest_timestamp_ns = slot.timestamp_ns.load(std::memory_order_relaxed);
+                newest_consistent = newest_sequence != 0 && newest_sequence == sequence &&
+                    slot.sequence.load(std::memory_order_acquire) == newest_sequence;
+            }
+            XELOGI(
+                "ZeroFGOutputTelemetry observer=JNI fps={:.2f} reset_generation={} sequence={} "
+                "newest_sequence={} newest_generation={} newest_timestamp_ns={} newest_age_us={} "
+                "newest_future={} newest_consistent={}",
+                fps, reset_generation, sequence, newest_sequence, newest_generation, newest_timestamp_ns,
+                newest_timestamp_ns && now_ns >= newest_timestamp_ns ? (now_ns - newest_timestamp_ns) / 1000 : 0,
+                newest_timestamp_ns > now_ns, newest_consistent);
+        }
+    }
+    return jdouble(fps);
+}
+
 static jlongArray j_presentation_state(JNIEnv* env, jobject thiz) {
     const auto& runtime = xe::ui::RuntimePresentation();
     jlong values[] = {runtime.display_mode.load(), runtime.frame_generation_requested.load() ? 1 : 0,
@@ -1412,6 +1475,7 @@ static void j_set_lsfg(JNIEnv* env, jobject thiz, jboolean enabled, jstring cach
         runtime.lsfg_cache = chars;
     }
     env->ReleaseStringUTFChars(cache, chars);
+    if (enabled) xe::ui::vulkan::RequestZeroFGMode(0);
     runtime.frame_generation_requested = false;
     runtime.frame_generation_engine = 1;
     runtime.frame_generation_multiplier = std::clamp(int(multiplier), 2, 4);
@@ -1421,6 +1485,7 @@ static void j_set_lsfg(JNIEnv* env, jobject thiz, jboolean enabled, jstring cach
     runtime.generation_gpu_ms = -1.0;
     runtime.configuration_epoch.fetch_add(1);
     runtime.frame_generation_requested = enabled;
+    ae::RequestPresentationRefresh();
     XELOGI("Frame generation: LSFG {} from the app, {}x, display {:.1f} Hz", enabled ? "requested" : "off",
            runtime.frame_generation_multiplier.load(), runtime.display_hz.load());
 }
@@ -2092,6 +2157,10 @@ int register_xendroid_Emulator(JNIEnv* env){
             ,{"request_frame_trace", "()Z", (void *) j_request_frame_trace}
             ,{"presenter_work", "()[J", (void *) j_presenter_work}
             ,{"set_frame_generation", "(ZIF)V", (void *) j_set_frame_generation}
+            ,{"set_zerofg_mode", "(I)V", (void *) j_set_zerofg_mode}
+            ,{"zerofg_mode", "()I", (void *) j_zerofg_mode}
+            ,{"zerofg_main_surface_active", "()Z", (void *) j_zerofg_main_surface_active}
+            ,{"output_fps", "()D", (void *) j_output_fps}
             ,{"presentation_state", "()[J", (void *) j_presentation_state}
             ,{"frame_generation_gpu_histogram", "()[J", (void *) j_frame_generation_gpu_histogram}
             ,{"build_lsfg_cache", "(Ljava/lang/String;Ljava/lang/String;)I", (void *) j_build_lsfg_cache}

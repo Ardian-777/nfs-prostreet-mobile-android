@@ -297,7 +297,10 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
 
         XELOGI("Loading custom Vulkan driver: {}", custom_lib_path);
 
-        vulkan_instance->loader_= adrenotools_open_libvulkan(RTLD_NOW,ADRENOTOOLS_DRIVER_CUSTOM,nullptr
+        // CONTEXT_PRIORITY: ZeroFG's device asks KGSL for a higher priority
+        // than the game's (VulkanDevice::CreateIfSupported).
+        vulkan_instance->loader_= adrenotools_open_libvulkan(RTLD_NOW,
+                ADRENOTOOLS_DRIVER_CUSTOM | ADRENOTOOLS_DRIVER_CONTEXT_PRIORITY,nullptr
                 ,hook_dir.c_str()
                 ,custom_lib_dir.c_str()
                 ,custom_lib_name.c_str()

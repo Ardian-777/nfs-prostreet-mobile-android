@@ -30,6 +30,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/frame_stats.h"
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 #include "xenia/ui/surface.h"
@@ -210,6 +211,9 @@ class Presenter {
       // XenDroid (15m): a CRT look - one pass at any ratio, bilinear picture
       // with scanlines and darker corners (shaders/guest_output_crt.xesli).
       kCrt,
+      // The existing XenDroid SGSR 1 edge-direction variant. Appended so the
+      // Plus live indices for SGSR, Lanczos and CRT keep their old meanings.
+      kSgsrEdgeDirection,
     };
 
     // This value is used as a lerp factor.
@@ -290,6 +294,27 @@ class Presenter {
     float fsr_sharpness_reduction_ = kFsrSharpnessReductionDefault;
     bool dither_ = false;
   };
+
+  // Backend-independent geometry policy for placing the guest image in a host
+  // output. The rectangle may extend outside the output when overscan cropping
+  // is allowed; the backend is responsible for clipping it to its surface.
+  struct GuestOutputPresentationGeometry {
+    bool valid = false;
+    bool letterbox_active = false;
+    int32_t output_x = 0;
+    int32_t output_y = 0;
+    uint32_t output_width = 0;
+    uint32_t output_height = 0;
+  };
+
+  // Shared logical geometry calculation used by the normal swapchain
+  // presenter and independent presentation backends. No WSI state is involved.
+  static GuestOutputPresentationGeometry
+  CalculateGuestOutputPresentationGeometry(
+      uint32_t display_aspect_ratio_x, uint32_t display_aspect_ratio_y,
+      uint32_t output_width, uint32_t output_height,
+      bool allow_overscan_cutoff, bool present_letterbox,
+      int32_t present_safe_area_x, int32_t present_safe_area_y);
 
   Presenter(const Presenter& presenter) = delete;
   Presenter& operator=(const Presenter& presenter) = delete;
@@ -386,6 +411,7 @@ class Presenter {
     uint32_t display_aspect_ratio_x;
     uint32_t display_aspect_ratio_y;
     bool is_8bpc;
+    xe::SourcePublicationTelemetry source_publication;
 
     GuestOutputProperties() { SetToInactive(); }
 
@@ -400,6 +426,7 @@ class Presenter {
       display_aspect_ratio_x = 0;
       display_aspect_ratio_y = 0;
       is_8bpc = false;
+      source_publication = {};
     }
   };
 
@@ -419,6 +446,8 @@ class Presenter {
     kLanczosDither,
     kCrt,
     kCrtDither,
+    kSgsrEdgeDirection,
+    kSgsrEdgeDirectionDither,
 
     kCount,
   };
@@ -436,6 +465,7 @@ class Presenter {
       case GuestOutputPaintEffect::kSgsrDither:
       case GuestOutputPaintEffect::kLanczosDither:
       case GuestOutputPaintEffect::kCrtDither:
+      case GuestOutputPaintEffect::kSgsrEdgeDirectionDither:
         return false;
       default:
         // The result of any other effect can be stretched with bilinear
@@ -697,7 +727,8 @@ class Presenter {
   [[nodiscard]] std::unique_lock<std::mutex> ConsumeGuestOutput(
       uint32_t& mailbox_index_or_max_if_inactive_out,
       GuestOutputProperties* properties_out,
-      GuestOutputPaintConfig* paint_config_out);
+      GuestOutputPaintConfig* paint_config_out,
+      bool* consumed_new_publication_out = nullptr);
   // The properties are passed explicitly, not taken from the current acquired
   // image, so it can be called for a copy of the acquired image's properties
   // outside the consumer lock if the implementation has its own synchronization
@@ -718,6 +749,39 @@ class Presenter {
       uint32_t frontbuffer_height,
       std::function<bool(GuestOutputRefreshContext& context)> refresher,
       bool& is_8bpc_out_ref) = 0;
+  // Called synchronously after the new mailbox image has been published as
+  // ready, but before the producer selects its next writable image. Backends
+  // may use this boundary for bounded, non-WSI observational or ingest work.
+  // Failure must never roll back publication or prevent normal presentation.
+  // Returning true transfers this refresh's presentation scheduling to the
+  // backend. The mailbox publication and writable-image rotation still
+  // complete, but RefreshGuestOutput won't synchronously paint or request a
+  // UI-thread paint for this refresh.
+  virtual bool OnGuestOutputPublished(
+      uint32_t mailbox_index, bool guest_output_active, uint64_t source_id,
+      uint64_t issue_time_ns, uint64_t publish_time_ns,
+      const GuestOutputProperties& properties) {
+    return false;
+  }
+  virtual bool IsGuestOutputPresentationBackendActive() const {
+    return false;
+  }
+  virtual void OnGuestOutputPublicationCommitted() {}
+
+  // For a backend-owned output thread. Waiting and scheduling must happen
+  // before this call; this only serializes the actual paint with surface
+  // lifecycle operations.
+  PaintResult PaintGuestOutputFromExternalThread();
+  // Same as PaintGuestOutputFromExternalThread, but never waits for the paint
+  // mode lock: a surface lifecycle operation holding it may be joining the
+  // calling thread. Returns kNotPresented with lock_busy_out set when busy.
+  PaintResult TryPaintGuestOutputFromExternalThread(bool& lock_busy_out);
+  // For a backend-owned thread: asks the UI thread to paint, which is where
+  // an outdated connection is recovered. Never waits for the paint mode lock,
+  // and does nothing when painting is not accessible (kNone). Returns whether
+  // the request was made.
+  bool RequestUIThreadPaintFromExternalThread();
+  GuestOutputPaintConfig GetGuestOutputPaintConfigForExternalThread();
 
   // For guest output capturing (for debugging use thus - shouldn't be adding
   // any noise like dithering that's not present in the original image),
