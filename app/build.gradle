@@ -68,7 +68,7 @@ android {
     ndkVersion '29.0.14206865'
 
     defaultConfig {
-        applicationId 'xendroid.compose'
+        applicationId 'com.ardian.nfsprostreet'
         // 29+ matches :emulator-core (native ELF TLS in libe.so).
         minSdk 29
         targetSdk 35
@@ -175,7 +175,7 @@ android {
 release {
     // -PxendroidReleaseIdSuffix=.fork.opt installs a test build alongside the
     // regular one; -PxendroidReleaseDebuggable allows run-as/simpleperf on it.
-    applicationIdSuffix project.findProperty('xendroidReleaseIdSuffix') ?: '.fork'
+    applicationIdSuffix project.findProperty('xendroidReleaseIdSuffix') ?: ''
     debuggable project.hasProperty('xendroidReleaseDebuggable')
     minifyEnabled false
     shrinkResources false
