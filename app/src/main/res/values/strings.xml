@@ -9,7 +9,7 @@
     <string name="hud_zerofg_output_active">output active</string>
     <string name="hud_zerofg_waiting">waiting for output</string>
     <string name="hud_zerofg_output_rate">%1$s output/s</string>
-    <string name="app_name">Xendroid+</string>
+    <string name="app_name">NFS ProStreet Mobile</string>
 
     <!-- U02: in-game menu (pt-BR in values-pt-rBR). Keep the same names and placeholders. -->
     <string name="menu_open">Open menu</string>
